@@ -10,9 +10,9 @@ from datetime import datetime
 #                    CONFIGURATION DE PAGE
 # ============================================================
 st.set_page_config(
-    page_title="Réconciliation Objectifs PREV vs Power BI",
+    page_title="Réconciliation SAC vs Power BI",
     layout="wide",
-    page_icon="🎯",
+    page_icon="📊",
     initial_sidebar_state="expanded"
 )
 
@@ -23,6 +23,7 @@ pd.set_option('future.no_silent_downcasting', True)
 # ============================================================
 st.markdown("""
 <style>
+    /* Header principal */
     .main-title {
         font-size: 2.1rem;
         font-weight: 700;
@@ -37,12 +38,13 @@ st.markdown("""
     }
     .main-subtitle b { color: #0f172a; }
 
+    /* Cartes KPI */
     .kpi-card {
         background: #ffffff;
         padding: 1.25rem 1.5rem;
         border-radius: 12px;
         border: 1px solid #e2e8f0;
-        border-left: 4px solid #8b5cf6;
+        border-left: 4px solid #0284c7;
         box-shadow: 0 1px 3px rgba(0,0,0,0.04);
         height: 100%;
     }
@@ -65,27 +67,30 @@ st.markdown("""
     .kpi-value-ok    { color: #15803d; }
     .kpi-value-alert { color: #b91c1c; }
 
+    /* Upload feedback */
     .upload-ok {
         padding: 0.4rem 0.7rem;
-        background: #ede9fe;
+        background: #dcfce7;
         border-radius: 6px;
-        color: #5b21b6;
+        color: #166534;
         font-size: 0.8rem;
         margin-top: -0.5rem;
         margin-bottom: 0.8rem;
         font-weight: 500;
     }
 
+    /* Diagnostic box */
     .diag-box {
-        background: #f5f3ff;
-        border-left: 3px solid #8b5cf6;
+        background: #f0f9ff;
+        border-left: 3px solid #0284c7;
         padding: 0.7rem 1rem;
         border-radius: 6px;
         margin-bottom: 1rem;
         font-size: 0.88rem;
-        color: #5b21b6;
+        color: #075985;
     }
 
+    /* Tabs styling */
     .stTabs [data-baseweb="tab-list"] { gap: 6px; }
     .stTabs [data-baseweb="tab"] {
         padding: 8px 16px;
@@ -94,6 +99,7 @@ st.markdown("""
         font-size: 0.88rem;
     }
 
+    /* Section header */
     .section-header {
         font-size: 1.1rem;
         font-weight: 600;
@@ -101,6 +107,7 @@ st.markdown("""
         margin: 1.5rem 0 0.75rem 0;
     }
 
+    /* Sidebar */
     .sidebar-title {
         font-weight: 700;
         font-size: 1rem;
@@ -113,7 +120,6 @@ st.markdown("""
 
 # ============================================================
 #                    FONCTIONS UTILITAIRES
-#              (identiques à l'application SAC)
 # ============================================================
 def safe_float_conversion(val):
     if isinstance(val, pd.Series): val = val.iloc[0]
@@ -172,9 +178,37 @@ def generate_join_key(enseigne, rayon):
     return f"{e}_{r}"
 
 
+def make_unique(cols):
+    seen = {}
+    result = []
+    for c in cols:
+        if c in seen:
+            seen[c] += 1
+            result.append(f"{c}.{seen[c]}")
+        else:
+            seen[c] = 0
+            result.append(c)
+    return result
+
+
+# Détection stricte des mois (évite faux positifs 'mai' dans 'semaine')
+MONTH_PATTERN = re.compile(
+    r'^\s*(janvier|janv\.?|février|fevrier|févr\.?|fevr\.?|mars|avril|mai|juin|'
+    r'juillet|juil\.?|août|aout|septembre|sept\.?|octobre|oct\.?|novembre|nov\.?|'
+    r'décembre|decembre|déc\.?|dec\.?)(\b|\s|$|\.|-|/)',
+    re.IGNORECASE
+)
+
+
+def cell_is_month(val):
+    s = str(val).strip()
+    if not s or s.lower() in ('nan', 'none', '<na>', 'nat'):
+        return False
+    return bool(MONTH_PATTERN.match(s))
+
+
 # ============================================================
 #                 MOTEUR DE RÈGLES MÉTIER
-#              (identique à l'application SAC)
 # ============================================================
 def apply_business_rules(df, col_enseigne, report_type):
     df['Rayon'] = df['Rayon'].astype(str)
@@ -230,181 +264,9 @@ def apply_business_rules(df, col_enseigne, report_type):
 
 
 # ============================================================
-#              LECTURE BLINDÉE DU FICHIER PREV
+#                    CHARGEMENT POWER BI
 # ============================================================
-MONTH_ORDER = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin',
-               'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre']
-
-
-def _find_header_row(df_raw):
-    """Cherche la ligne contenant 'Enseigne Client' ET 'Rayon'."""
-    for i in range(min(10, len(df_raw))):
-        row = df_raw.iloc[i].fillna('').astype(str).str.lower().str.strip().values
-        has_enseigne = any('enseigne' in str(v) and 'client' in str(v) for v in row)
-        has_rayon = any(str(v).strip() == 'rayon' for v in row)
-        if has_enseigne and has_rayon:
-            return i
-    # Fallback : juste 'rayon' et une autre colonne mois
-    for i in range(min(10, len(df_raw))):
-        row = df_raw.iloc[i].fillna('').astype(str).str.lower().str.strip().values
-        has_rayon = any(str(v).strip() == 'rayon' for v in row)
-        has_month = any(remove_accents(str(v)).strip().lower() in [remove_accents(m) for m in MONTH_ORDER] for v in row)
-        if has_rayon and has_month:
-            return i
-    return -1
-
-
-def _apply_header_row(df_raw, header_idx):
-    """Applique la ligne header_idx comme header du DataFrame."""
-    raw_headers = df_raw.iloc[header_idx].fillna('').values
-    new_cols = [clean_excel_text(str(v)) if str(v).strip() != '' else f'COL_{j}'
-                for j, v in enumerate(raw_headers)]
-    df = df_raw.iloc[header_idx + 1:].copy()
-    df.columns = new_cols
-    df = df.reset_index(drop=True)
-    # Retirer les lignes entièrement vides
-    df = df.dropna(how='all').reset_index(drop=True)
-    return df
-
-
-def read_prev_file(file_buffer):
-    """Lecture robuste du fichier Objectifs PREV (CSV ou XLSX).
-    Teste séparateurs (; , \\t) et encodages (utf-8, latin1, cp1252) pour les CSV.
-    Cherche la ligne contenant 'Enseigne Client' + 'Rayon' comme header."""
-    if hasattr(file_buffer, 'seek'):
-        file_buffer.seek(0)
-
-    name = (getattr(file_buffer, 'name', '') or '').lower()
-
-    # --- XLSX ---
-    if name.endswith('.xlsx') or name.endswith('.xls'):
-        try:
-            df_raw = pd.read_excel(file_buffer, header=None, dtype=object)
-        except Exception as e:
-            return None, f"Échec lecture Excel : {e}"
-        header_idx = _find_header_row(df_raw)
-        if header_idx == -1:
-            return None, "Ligne d'en-tête (Enseigne Client + Rayon) introuvable dans le fichier XLSX"
-        return _apply_header_row(df_raw, header_idx), None
-
-    # --- CSV : tester toutes les combinaisons ---
-    if hasattr(file_buffer, 'seek'):
-        file_buffer.seek(0)
-    raw_bytes = file_buffer.read()
-    if isinstance(raw_bytes, str):
-        raw_bytes = raw_bytes.encode('utf-8')
-
-    best_result = None
-    best_score = 0
-
-    for encoding in ['utf-8', 'utf-8-sig', 'latin1', 'cp1252']:
-        # 1. Décoder et repérer la ligne d'en-tête AVANT read_csv
-        try:
-            text = raw_bytes.decode(encoding, errors='replace')
-        except Exception:
-            continue
-        lines = text.splitlines()
-
-        header_line_idx = -1
-        for i, line in enumerate(lines[:15]):
-            low = line.lower()
-            if 'enseigne' in low and 'rayon' in low:
-                header_line_idx = i
-                break
-        if header_line_idx == -1:
-            continue
-
-        # 2. Tester les séparateurs, en sautant les lignes avant le header
-        for sep in [';', ',', '\t', '|']:
-            try:
-                df = pd.read_csv(
-                    io.BytesIO(raw_bytes),
-                    sep=sep, encoding=encoding,
-                    skiprows=header_line_idx,
-                    dtype=str,
-                    engine='python',
-                    on_bad_lines='skip'
-                )
-                if df.shape[1] < 5:
-                    continue
-
-                # Vérifier présence de 'Enseigne Client' + 'Rayon'
-                cols_norm = [remove_accents(str(c)).lower().strip() for c in df.columns]
-                has_enseigne = any('enseigne' in c for c in cols_norm)
-                has_rayon = any(c == 'rayon' for c in cols_norm)
-                if not (has_enseigne and has_rayon):
-                    continue
-
-                # Score par nombre de colonnes mois reconnues
-                months_norm = [remove_accents(m).lower() for m in MONTH_ORDER]
-                score = sum(1 for c in cols_norm if c in months_norm)
-
-                # Nettoyer les noms de colonnes
-                df.columns = [clean_excel_text(str(c)) if str(c).strip() != '' else f'COL_{j}'
-                              for j, c in enumerate(df.columns)]
-                df = df.dropna(how='all').reset_index(drop=True)
-
-                if score > best_score:
-                    best_result = df
-                    best_score = score
-                    if score >= 12:
-                        return best_result, None
-            except Exception:
-                continue
-
-    if best_result is not None:
-        return best_result, None
-
-    return None, "Impossible de parser le fichier CSV (aucune combinaison séparateur/encodage n'a fonctionné)"
-
-
-# ============================================================
-#         DÉTECTION DU MOIS DANS LE FICHIER POWER BI
-# ============================================================
-MONTH_NUM_TO_NAME = {
-    1: 'janvier', 2: 'février', 3: 'mars', 4: 'avril',
-    5: 'mai', 6: 'juin', 7: 'juillet', 8: 'août',
-    9: 'septembre', 10: 'octobre', 11: 'novembre', 12: 'décembre',
-}
-
-
-def detect_month_from_pbi(file_buffer):
-    """Lit la première ligne du fichier Power BI pour détecter le mois.
-    Cherche des patterns comme 'au 31/03', '31/03/2026', 'mars', etc."""
-    if hasattr(file_buffer, 'seek'):
-        file_buffer.seek(0)
-    try:
-        df_peek = pd.read_excel(file_buffer, header=None, nrows=4)
-    except Exception:
-        return None
-
-    all_text = ' '.join(df_peek.fillna('').astype(str).values.flatten())
-
-    # Pattern 1 : "au JJ/MM" ou "JJ/MM/AAAA"
-    m = re.search(r'\b\d{1,2}[/\-](\d{1,2})(?:[/\-]\d{2,4})?\b', all_text)
-    if m:
-        try:
-            month_num = int(m.group(1))
-            if 1 <= month_num <= 12:
-                return MONTH_NUM_TO_NAME[month_num]
-        except ValueError:
-            pass
-
-    # Pattern 2 : nom de mois explicite
-    all_text_norm = remove_accents(all_text).lower()
-    for mnum, mname in MONTH_NUM_TO_NAME.items():
-        mname_norm = remove_accents(mname).lower()
-        if re.search(rf'\b{mname_norm}\b', all_text_norm):
-            return mname
-
-    return None
-
-
-# ============================================================
-#                    CHARGEMENT POWER BI (OBJECTIF)
-# ============================================================
-def load_powerbi_objectif_data(file_buffer):
-    """Charge un export PBI ayant une colonne 'Objectif'."""
+def load_powerbi_data(file_buffer, target_col):
     if hasattr(file_buffer, 'seek'):
         file_buffer.seek(0)
     try:
@@ -417,7 +279,6 @@ def load_powerbi_objectif_data(file_buffer):
         except Exception:
             return pd.DataFrame()
 
-    target_col = 'Objectif'
     if target_col not in df_pbi.columns: return pd.DataFrame()
     if '-Rayon' not in df_pbi.columns or '-Centrale' not in df_pbi.columns: return pd.DataFrame()
 
@@ -448,186 +309,243 @@ def load_powerbi_objectif_data(file_buffer):
 # ============================================================
 #                PIPELINE D'ANALYSE (UN TEST)
 # ============================================================
-def process_objectif_test(mode, df_prev_source, file_bi, report_type):
-    """mode: 'Mensuel' ou 'Annuel'."""
-    if file_bi is None:
-        return None, None, "Fichier Power BI non fourni"
-    if df_prev_source is None:
-        return None, None, "Fichier PREV non chargé"
+def process_single_test(nom_test, conf, df_raw_source, report_type):
+    """Traite un seul test et retourne (recap_df, diagnostic, skip_reason)."""
+    if conf['file'] is None:
+        return None, None, "Fichier BI non fourni"
 
-    # Détecter mois depuis BI
-    detected_month = detect_month_from_pbi(file_bi)
-    if not detected_month:
-        return None, None, "Impossible de détecter le mois dans la 1ère ligne du fichier Power BI"
-
-    # Charger PBI
-    df_pbi = load_powerbi_objectif_data(file_bi)
+    df_pbi = load_powerbi_data(conf['file'], conf['col_valeur'])
     if df_pbi.empty:
-        return None, None, "Colonne 'Objectif' introuvable dans le fichier Power BI"
+        return None, None, f"Colonne '{conf['col_valeur']}' introuvable dans le fichier BI"
 
-    # Copie PREV pour ne pas la muter
-    df_prev = df_prev_source.copy()
+    if df_raw_source is None:
+        return None, None, f"Onglet SAC '{conf['onglet_sac']}' introuvable"
 
-    # Mapper les colonnes du PREV aux noms des mois (insensible accents/casse)
-    def col_to_month(col):
-        c = remove_accents(str(col)).lower().strip()
-        for m in MONTH_ORDER:
-            if c == remove_accents(m).lower():
-                return m
-        return None
+    df_raw = df_raw_source.copy()
 
-    month_cols_map = {}
-    for c in df_prev.columns:
-        m = col_to_month(c)
-        if m and m not in month_cols_map:
-            month_cols_map[m] = c
+    # Radar header
+    header_idx = -1
+    for i in range(min(20, len(df_raw))):
+        row_vals = df_raw.iloc[i].fillna('').astype(str).str.lower().values
+        if any('rayon' in str(v) for v in row_vals):
+            header_idx = i
+            if i + 1 < len(df_raw):
+                sub_vals = df_raw.iloc[i+1].fillna('').astype(str).str.lower().values
+                if any('sem ' in str(v) or 'semaine' in str(v) or 'sem.' in str(v) for v in sub_vals) or \
+                   any(str(v) in ['n', 'n-1', 'réalisé', 'realise'] for v in sub_vals):
+                    header_idx = i + 1
+            break
 
-    if detected_month not in month_cols_map:
-        return None, None, f"Colonne '{detected_month}' introuvable dans le fichier PREV"
+    if header_idx == -1:
+        return None, None, "Ligne d'en-tête (contenant 'Rayon') non détectée"
 
-    # Calculer col_val selon le mode
-    month_idx = MONTH_ORDER.index(detected_month)
+    raw_headers = df_raw.iloc[header_idx].values.copy()
+    if header_idx > 0:
+        above_headers = df_raw.iloc[header_idx - 1].values
+        for j in range(len(raw_headers)):
+            val_str = str(raw_headers[j]).strip().lower()
+            if val_str in ['nan', 'none', '<na>', 'nat', '']:
+                raw_headers[j] = above_headers[j]
 
-    if mode == 'Mensuel':
-        cols_to_sum = [month_cols_map[detected_month]]
-        diagnostic = f"Mois détecté : **{detected_month.upper()}** · Colonne ciblée dans PREV : {month_cols_map[detected_month]}"
-    else:  # Annuel : somme janvier → mois détecté
-        cols_to_sum = []
-        for i in range(month_idx + 1):
-            m = MONTH_ORDER[i]
-            if m in month_cols_map:
-                cols_to_sum.append(month_cols_map[m])
-        diagnostic = f"Mois détecté : **{detected_month.upper()}** · Cumul de {len(cols_to_sum)} mois : {', '.join(cols_to_sum)}"
+    new_cols = [clean_excel_text(str(val)) if str(val) != 'nan' else f'COL_{j}' for j, val in enumerate(raw_headers)]
+    unique_cols = make_unique(new_cols)
 
-    # Convertir les colonnes en float
-    for c in cols_to_sum:
-        df_prev[c] = df_prev[c].apply(safe_float_conversion)
+    # Ligne des mois
+    month_row_idx = -1
+    for i in range(header_idx - 1, -1, -1):
+        row_vals = df_raw.iloc[i].fillna('').values
+        if any(cell_is_month(v) for v in row_vals):
+            month_row_idx = i
+            break
 
-    col_val = 'Valeur_Objectif_PREV'
-    df_prev[col_val] = df_prev[cols_to_sum].sum(axis=1)
+    target_month_cols = []
+    detected_month = "Inconnu"
+    if month_row_idx != -1:
+        row_vals = df_raw.iloc[month_row_idx].values
+        current_month = None
+        filled_months = []
+        for val in row_vals:
+            val_str = str(val).strip()
+            if val_str.lower() not in ['nan', 'none', '<na>', 'nat', '']:
+                current_month = val
+            filled_months.append(current_month)
 
-    # Identifier col_enseigne ("Enseigne Client")
+        valid_months = []
+        for m in filled_months:
+            if m is not None and cell_is_month(m):
+                if m not in valid_months:
+                    valid_months.append(m)
+
+        if valid_months:
+            latest_month = valid_months[-1]
+            detected_month = str(latest_month)
+            col_indices = [j for j, m in enumerate(filled_months) if m == latest_month]
+            target_month_cols = [unique_cols[j] for j in col_indices if j < len(unique_cols)]
+
+    df_raw.columns = unique_cols
+    df_sac = df_raw.iloc[header_idx+1:].reset_index(drop=True)
+
     col_enseigne = None
-    for c in df_prev.columns:
-        if 'enseigne' in str(c).lower() and 'client' in str(c).lower():
+    for c in df_sac.columns:
+        str_c = str(c).lower()
+        if col_enseigne is None and ('enseigne' in str_c or 'centrale' in str_c or 'client' in str_c):
             col_enseigne = c
-            break
     if not col_enseigne:
-        for c in df_prev.columns:
-            if 'enseigne' in str(c).lower() or 'centrale' in str(c).lower():
-                col_enseigne = c
-                break
-    if not col_enseigne:
-        return None, None, "Colonne 'Enseigne Client' non détectée dans le fichier PREV"
+        return None, None, "Colonne 'Enseigne' non détectée"
 
-    # Identifier col_pays
+    df_sac = df_sac[~df_sac[col_enseigne].astype(str).str.contains('Giant Tiger', case=False, na=False)]
+
+    idx_rayon = next((i for i, c in enumerate(df_sac.columns) if 'rayon' in str(c).lower()), 2)
+    possible_cols = []
+    for c in df_sac.columns[idx_rayon+1:]:
+        c_lower = str(c).lower()
+        if any(x in c_lower for x in ['total', 'cumul', 'ecart', 'écart', 'var', '%', 'obj']):
+            continue
+        possible_cols.append(c)
+
+    col_val = None
+    diagnostic = ""
+
+    if conf['mode'] == "Mensuel":
+        cols_to_sum = [c for c in target_month_cols if c in possible_cols]
+        if not cols_to_sum: cols_to_sum = possible_cols
+        for c in cols_to_sum: df_sac[c] = df_sac[c].apply(safe_float_conversion)
+        col_val = 'Valeur_Cumulee_D_a_H'
+        df_sac[col_val] = df_sac[cols_to_sum].sum(axis=1)
+        diagnostic = f"Mois détecté : **{detected_month.upper()}** · Somme de {len(cols_to_sum)} colonne(s) : {', '.join(cols_to_sum)}"
+
+    elif conf['mode'] in ["Semaine_Derniere", "Semaine_Avant_Derniere"]:
+        base_to_cols = defaultdict(list)
+        for c in possible_cols:
+            base_name = re.sub(r'\.\d+$', '', str(c)).strip()
+            base_to_cols[base_name].append(c)
+        valid_base_names = []
+        for base_name, cols in base_to_cols.items():
+            if sum(df_sac[c].apply(safe_float_conversion).abs().sum() for c in cols) > 0:
+                valid_base_names.append(base_name)
+        if len(valid_base_names) < 2:
+            return None, None, f"Pas assez de semaines avec valeurs ({len(valid_base_names)})"
+        target_base = valid_base_names[-1] if conf['mode'] == "Semaine_Derniere" else valid_base_names[-2]
+        target_cols = base_to_cols[target_base]
+        for c in target_cols: df_sac[c] = df_sac[c].apply(safe_float_conversion)
+        col_val = f'Valeur_Sem_{target_base.replace(" ", "_")}'
+        df_sac[col_val] = df_sac[target_cols].sum(axis=1)
+        mot_fusion = "fusionnées" if len(target_cols) > 1 else "sélectionnée"
+        diagnostic = f"Semaine analysée : **{target_base}** · Colonnes {mot_fusion} : {', '.join(target_cols)}"
+
+    else:  # Annuel
+        mots_cles = ['va net', 'ttc', 'ca ', 'chiffre', 'valeur', 'réalisé', 'realise']
+        for c in df_sac.columns:
+            if col_val is None and any(mot in str(c).lower() for mot in mots_cles):
+                col_val = c
+        if not col_val and possible_cols:
+            for c in possible_cols:
+                if df_sac[c].apply(safe_float_conversion).abs().sum() > 0:
+                    col_val = c
+                    break
+        if not col_val:
+            return None, None, "Colonne de valeurs annuelle non détectée"
+        df_sac[col_val] = df_sac[col_val].apply(safe_float_conversion)
+        diagnostic = f"Colonne ciblée : **{col_val}**"
+
+    # Détection pays
     col_pays = None
-    for c in df_prev.columns:
-        if str(c).strip().lower() == 'pays':
+    max_matches = 0
+    pattern_pays_detect = 'France|Guadeloupe|Guyane|Maurice|Réunion|Reunion|Martinique|Calédonie|Caledonie|Malte|Saint[- ]Martin|Royaume[- ]Uni|Barthelemy|Barthélemy|Luxembourg|USA|Etats|Canada|CAN|US'
+    for c in df_sac.columns:
+        if str(df_sac[c].dtype) in ['float64', 'int64']: continue
+        matches = df_sac[c].astype(str).str.contains(pattern_pays_detect, case=False, na=False, regex=True).sum()
+        if matches > max_matches:
+            max_matches = matches
             col_pays = c
-            break
+    if not col_pays or max_matches < 5:
+        col_pays = None
 
-    # Normaliser le nom de la colonne Rayon (apply_business_rules attend 'Rayon')
-    for c in df_prev.columns:
-        if str(c).strip().lower() == 'rayon' and c != 'Rayon':
-            df_prev = df_prev.rename(columns={c: 'Rayon'})
-            break
-
-    if 'Rayon' not in df_prev.columns:
-        return None, None, "Colonne 'Rayon' non détectée dans le fichier PREV"
-
-    # Exclusion Giant Tiger
-    df_prev = df_prev[~df_prev[col_enseigne].astype(str).str.contains('Giant Tiger', case=False, na=False)]
-
-    # Règles métier
-    df_prev = apply_business_rules(df_prev, col_enseigne, report_type)
+    df_sac = apply_business_rules(df_sac, col_enseigne, report_type)
 
     if report_type == "Diffusion":
-        df_prev.loc[df_prev[col_enseigne].astype(str).str.strip().str.upper() == 'GL', col_enseigne] = 'Galeries Lafayette'
+        df_sac.loc[df_sac[col_enseigne].astype(str).str.strip().str.upper() == 'GL', col_enseigne] = 'Galeries Lafayette'
 
     # Filtres géographiques
     if col_pays:
         if report_type == "Diffusion":
             pattern_pays = 'France|Guadeloupe|Guyane|Maurice|Réunion|Reunion|Martinique|Calédonie|Caledonie|Malte|Saint[- ]Martin|Royaume[- ]Uni|Barthelemy|Barthélemy|Luxembourg'
-            cond_globale = df_prev[col_pays].astype(str).str.contains(pattern_pays, case=False, na=False, regex=True)
-            cond_belgique_ok = df_prev[col_enseigne].astype(str).str.contains('Besson|Paprika|Monoprix|Morgan|Pimkie|Promod', case=False, na=False) & \
-                               df_prev[col_pays].astype(str).str.contains('Belgique', case=False, na=False)
-            cond_celio_interdit = df_prev[col_enseigne].astype(str).str.contains('Celio', case=False, na=False) & \
-                                  ~df_prev[col_pays].astype(str).str.contains('France', case=False, na=False)
-            cond_hema_interdit = df_prev[col_enseigne].astype(str).str.contains('Hema', case=False, na=False) & \
-                                 ~df_prev[col_pays].astype(str).str.contains('France', case=False, na=False)
-            df_prev = df_prev[(cond_globale | cond_belgique_ok) & ~cond_celio_interdit & ~cond_hema_interdit]
+            cond_globale = df_sac[col_pays].astype(str).str.contains(pattern_pays, case=False, na=False, regex=True)
+            cond_belgique_ok = df_sac[col_enseigne].astype(str).str.contains('Besson|Paprika|Monoprix|Morgan|Pimkie|Promod', case=False, na=False) & \
+                               df_sac[col_pays].astype(str).str.contains('Belgique', case=False, na=False)
+            cond_celio_interdit = df_sac[col_enseigne].astype(str).str.contains('Celio', case=False, na=False) & \
+                                  ~df_sac[col_pays].astype(str).str.contains('France', case=False, na=False)
+            cond_hema_interdit = df_sac[col_enseigne].astype(str).str.contains('Hema', case=False, na=False) & \
+                                 ~df_sac[col_pays].astype(str).str.contains('France', case=False, na=False)
+            df_sac = df_sac[(cond_globale | cond_belgique_ok) & ~cond_celio_interdit & ~cond_hema_interdit]
 
-            mask_maurice = df_prev[col_pays].astype(str).str.contains('Maurice', case=False, na=False)
-            if mask_maurice.sum() > 0:
-                df_prev.loc[mask_maurice, col_val] *= 0.019
+            mask_maurice = df_sac[col_pays].astype(str).str.contains('Maurice', case=False, na=False)
+            if mask_maurice.sum() > 0: df_sac.loc[mask_maurice, col_val] *= 0.019
 
         elif report_type in ["Brothers", "Accessories USA"]:
-            mask_usa = df_prev[col_pays].astype(str).str.contains('USA|Etats-Unis|United States|US', case=False, na=False, regex=True)
-            df_prev = df_prev[mask_usa]
+            mask_usa = df_sac[col_pays].astype(str).str.contains('USA|Etats-Unis|United States|US', case=False, na=False, regex=True)
+            df_sac = df_sac[mask_usa]
 
         elif report_type == "Accessories Canada":
-            mask_canada = df_prev[col_pays].astype(str).str.contains('Canada|CAN', case=False, na=False, regex=True)
-            mask_100_canada = df_prev[col_enseigne].astype(str).str.contains('Jean Coutu|Brunet|Red Apple', case=False, na=False)
-            df_prev = df_prev[mask_canada | mask_100_canada]
+            mask_canada = df_sac[col_pays].astype(str).str.contains('Canada|CAN', case=False, na=False, regex=True)
+            mask_100_canada = df_sac[col_enseigne].astype(str).str.contains('Jean Coutu|Brunet|Red Apple', case=False, na=False)
+            df_sac = df_sac[mask_canada | mask_100_canada]
 
-    # Agrégation : par (Enseigne, Rayon) + TOTAL par centrale
-    if not df_prev.empty:
-        df_prev['Join_Key'] = df_prev.apply(
-            lambda x: generate_join_key(x[col_enseigne], x['Rayon']), axis=1
-        ).astype(str)
-        df_prev_rayons = df_prev.groupby('Join_Key', as_index=False)[col_val].sum()
-        df_prev['Centrale_Key'] = df_prev['Join_Key'].apply(lambda x: x.split('_')[0])
-        df_prev_total = df_prev.groupby('Centrale_Key', as_index=False)[col_val].sum()
-        df_prev_total['Join_Key'] = df_prev_total['Centrale_Key'] + "_TOTAL"
-        df_prev_out = pd.concat(
-            [df_prev_rayons, df_prev_total[['Join_Key', col_val]]],
-            ignore_index=True
-        )
-        df_prev_out = df_prev_out.groupby('Join_Key', as_index=False)[col_val].sum()
+    if not df_sac.empty:
+        df_sac['Join_Key'] = df_sac.apply(lambda x: generate_join_key(x[col_enseigne], x['Rayon']), axis=1).astype(str)
+        df_sac_rayons = df_sac.groupby('Join_Key', as_index=False)[col_val].sum()
+        df_sac['Centrale_Key'] = df_sac['Join_Key'].apply(lambda x: x.split('_')[0])
+        df_sac_total = df_sac.groupby('Centrale_Key', as_index=False)[col_val].sum()
+        df_sac_total['Join_Key'] = df_sac_total['Centrale_Key'] + "_TOTAL"
+        df_sac = pd.concat([df_sac_rayons, df_sac_total[['Join_Key', col_val]]], ignore_index=True)
+        df_sac = df_sac.groupby('Join_Key', as_index=False)[col_val].sum()
     else:
-        df_prev_out = pd.DataFrame(columns=['Join_Key', col_val])
+        df_sac = pd.DataFrame(columns=['Join_Key', col_val])
 
-    # Merge PBI ← PREV
-    merged = df_pbi.merge(df_prev_out, on='Join_Key', how='left')
-    merged['Objectif'] = merged['Objectif'].fillna(0.0)
+    merged = df_pbi.merge(df_sac, on='Join_Key', how='left')
+    merged[conf['col_valeur']] = merged[conf['col_valeur']].fillna(0.0)
     merged[col_val] = merged[col_val].fillna(0.0)
-    merged['Ecart'] = (merged[col_val] - merged['Objectif']).round(2)
+    merged['Ecart'] = (merged[col_val] - merged[conf['col_valeur']]).round(2)
     merged['Statut'] = merged['Ecart'].apply(lambda x: '❌ Anomalie' if abs(x) > 1 else '✅ OK')
 
-    cols_export = ['-Centrale', '-Rayon', col_val, 'Objectif', 'Ecart', 'Statut']
-    recap = merged[cols_export].rename(columns={
+    colonnes_export = ['-Centrale', '-Rayon', col_val, conf['col_valeur'], 'Ecart', 'Statut']
+    recap = merged[colonnes_export].rename(columns={
         '-Centrale': 'Centrale', '-Rayon': 'Rayon',
-        col_val: 'Valeur PREV', 'Objectif': 'Objectif Power BI',
+        col_val: 'Valeur SAC', conf['col_valeur']: 'Valeur Power BI',
     })
     recap = recap.sort_values(by='Statut', ascending=True).reset_index(drop=True)
 
     return recap, diagnostic, None
 
 
-def run_full_analysis(file_prev, file_ann, file_mens, report_type, progress_callback=None):
-    """Lance les 2 tests (Objectif Annuel, Objectif Mensuel)."""
+def run_full_analysis(file_sac, file_ann, file_mens, file_sem, report_type, progress_callback=None):
+    xl_sac = pd.ExcelFile(file_sac)
+    TESTS_MAPPING = {
+        "Annuel 2026":           {"onglet_sac": "Cumul 2026",            "file": file_ann,  "col_valeur": "N",     "mode": "Annuel"},
+        "Annuel 2025":           {"onglet_sac": "Cumul 2025",            "file": file_ann,  "col_valeur": "N-1",   "mode": "Annuel"},
+        "Mensuel 2026":          {"onglet_sac": "Cumul mois 2026",       "file": file_mens, "col_valeur": "N",     "mode": "Mensuel"},
+        "Mensuel 2025":          {"onglet_sac": "Cumul mois 2025 réel",  "file": file_mens, "col_valeur": "N-1",   "mode": "Mensuel"},
+        "Semaine Der 2026":      {"onglet_sac": "Cumul mois 2026",       "file": file_sem,  "col_valeur": "N",     "mode": "Semaine_Derniere"},
+        "Semaine Der 2025":      {"onglet_sac": "Cumul mois 2025",       "file": file_sem,  "col_valeur": "N-1",   "mode": "Semaine_Derniere"},
+        "Semaine Avant-Der 2026":{"onglet_sac": "Cumul mois 2026",       "file": file_sem,  "col_valeur": "N.1",   "mode": "Semaine_Avant_Derniere"},
+        "Semaine Avant-Der 2025":{"onglet_sac": "Cumul mois 2025",       "file": file_sem,  "col_valeur": "N-1.1", "mode": "Semaine_Avant_Derniere"},
+    }
+
+    onglets_uniques = set(conf['onglet_sac'] for conf in TESTS_MAPPING.values())
+    cache_sac = {}
+    for onglet in onglets_uniques:
+        try:
+            cache_sac[onglet] = xl_sac.parse(onglet, header=None)
+        except Exception:
+            cache_sac[onglet] = None
+
     all_recaps, diagnostics, skips = {}, {}, {}
-
-    # Lecture PREV
-    df_prev_source, prev_err = read_prev_file(file_prev)
-    if df_prev_source is None:
-        # Tous les tests sont skippés car pas de PREV
-        for nom in ["Objectif Annuel", "Objectif Mensuel"]:
-            skips[nom] = f"Fichier PREV illisible : {prev_err}"
-        return all_recaps, diagnostics, skips
-
-    TESTS = [
-        ("Objectif Annuel",  {"mode": "Annuel",  "file": file_ann}),
-        ("Objectif Mensuel", {"mode": "Mensuel", "file": file_mens}),
-    ]
-
-    for i, (nom_test, conf) in enumerate(TESTS):
+    total = len(TESTS_MAPPING)
+    for i, (nom_test, conf) in enumerate(TESTS_MAPPING.items()):
         if progress_callback:
-            progress_callback(i, len(TESTS), nom_test)
-        recap, diag, skip_reason = process_objectif_test(
-            conf['mode'], df_prev_source, conf['file'], report_type
-        )
+            progress_callback(i, total, nom_test)
+        df_raw_source = cache_sac.get(conf['onglet_sac'])
+        recap, diag, skip_reason = process_single_test(nom_test, conf, df_raw_source, report_type)
         if recap is not None:
             all_recaps[nom_test] = recap
             diagnostics[nom_test] = diag
@@ -652,6 +570,7 @@ def tab_label(nom, nb_anomalies):
 
 
 def df_to_excel_bytes(df, nom_test):
+    """Exporte un DataFrame en bytes Excel avec mise en forme conditionnelle."""
     safe_name = re.sub(r'[^A-Za-z0-9 _-]', '', nom_test)[:31] or "Recap"
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -693,8 +612,8 @@ def style_dataframe(df):
             return ['background-color: #fef2f2; color: #991b1b'] * len(row)
         return ['background-color: #f0fdf4; color: #166534'] * len(row)
     return df.style.apply(highlight_row, axis=1).format({
-        'Valeur PREV': lambda x: format_fr_number(x),
-        'Objectif Power BI': lambda x: format_fr_number(x),
+        'Valeur SAC': lambda x: format_fr_number(x),
+        'Valeur Power BI': lambda x: format_fr_number(x),
         'Ecart': lambda x: format_fr_number(x),
     })
 
@@ -724,29 +643,33 @@ with st.sidebar:
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown('<div class="sidebar-title">📎 Fichiers</div>', unsafe_allow_html=True)
 
-    file_prev = st.file_uploader("Fichier Objectifs PREV (obligatoire)", type=['xlsx', 'xls', 'csv'])
-    if file_prev:
-        st.markdown(f'<div class="upload-ok">✓ {file_prev.name}</div>', unsafe_allow_html=True)
+    file_sac = st.file_uploader("Fichier SAC (obligatoire)", type=['xlsx'])
+    if file_sac:
+        st.markdown(f'<div class="upload-ok">✓ {file_sac.name}</div>', unsafe_allow_html=True)
 
-    file_ann = st.file_uploader("Export BI — Annuel", type=['xlsx'])
+    file_ann = st.file_uploader("Export BI — Annuel", type=['xlsx', 'csv'])
     if file_ann:
         st.markdown(f'<div class="upload-ok">✓ {file_ann.name}</div>', unsafe_allow_html=True)
 
-    file_mens = st.file_uploader("Export BI — Mensuel", type=['xlsx'])
+    file_mens = st.file_uploader("Export BI — Mensuel", type=['xlsx', 'csv'])
     if file_mens:
         st.markdown(f'<div class="upload-ok">✓ {file_mens.name}</div>', unsafe_allow_html=True)
 
+    file_sem = st.file_uploader("Export BI — Semaines", type=['xlsx', 'csv'])
+    if file_sem:
+        st.markdown(f'<div class="upload-ok">✓ {file_sem.name}</div>', unsafe_allow_html=True)
+
     st.markdown("<br>", unsafe_allow_html=True)
-    bi_loaded = sum(1 for f in [file_ann, file_mens] if f is not None)
+    bi_loaded = sum(1 for f in [file_ann, file_mens, file_sem] if f is not None)
     launch_btn = st.button(
         "🚀 Lancer l'Analyse",
         type="primary",
-        disabled=(file_prev is None or bi_loaded == 0),
+        disabled=(file_sac is None or bi_loaded == 0),
         use_container_width=True
     )
 
-    if file_prev is None:
-        st.caption("⚠️ Importe le fichier PREV.")
+    if file_sac is None:
+        st.caption("⚠️ Importe au moins le fichier SAC.")
     elif bi_loaded == 0:
         st.caption("⚠️ Importe au moins un export Power BI.")
     else:
@@ -756,17 +679,15 @@ with st.sidebar:
     with st.expander("ℹ️ Aide & Documentation"):
         st.markdown("""
 **Fichiers attendus**
-- **PREV** (`.xlsx` ou `.csv`) : colonnes `Enseigne Client`, `Rayon`, `Pays`, `janvier`…`décembre`.
-  La ligne 1 peut contenir des commentaires, ils sont ignorés automatiquement.
-- **BI Annuel / Mensuel** : exports Power BI avec colonnes `-Centrale`, `-Rayon`, **`Objectif`**.
-  La 1ère ligne doit mentionner le mois en cours (ex: `au 31/03` → mars).
-
-**Calcul de la valeur PREV**
-- *Objectif Mensuel* : la colonne du mois détecté uniquement.
-- *Objectif Annuel* : somme des colonnes de janvier au mois détecté inclus.
+- **SAC** : `Check_Reporting.xlsx` avec onglets *Cumul 2026*, *Cumul 2025*, *Cumul mois 2026*, *Cumul mois 2025 réel*, *Cumul mois 2025*.
+- **BI Annuel / Mensuel / Semaines** : exports Power BI avec colonnes `-Centrale`, `-Rayon`, `N`, `N-1`, etc.
 
 **Tolérance d'écart**
 Un écart supérieur à **1 €** est classé anomalie.
+
+**Règles métier**
+Les rayons sont retraduits selon l'enseigne (ex : *Cheveux* chez BZB → *Bijoux*).
+Les filtres pays dépendent du type de reporting choisi.
 """)
 
     if st.session_state.last_run_time:
@@ -776,15 +697,15 @@ Un écart supérieur à **1 €** est classé anomalie.
 # ============================================================
 #                      ZONE PRINCIPALE
 # ============================================================
-st.markdown('<div class="main-title">🎯 Réconciliation Objectifs PREV vs Power BI</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">📊 Réconciliation SAC vs Power BI</div>', unsafe_allow_html=True)
 st.markdown(
     f'<div class="main-subtitle">Type de reporting : <b>{report_type}</b> '
-    f'· Contrôle automatisé des écarts entre objectifs PREV et Power BI</div>',
+    f'· Contrôle automatisé des écarts entre SAC et Power BI</div>',
     unsafe_allow_html=True
 )
 
 # Lancement de l'analyse
-if launch_btn and file_prev:
+if launch_btn and file_sac:
     progress_placeholder = st.empty()
     progress_bar = progress_placeholder.progress(0.0, text="Initialisation...")
 
@@ -794,7 +715,7 @@ if launch_btn and file_prev:
 
     try:
         all_recaps, diagnostics, skips = run_full_analysis(
-            file_prev, file_ann, file_mens, report_type,
+            file_sac, file_ann, file_mens, file_sem, report_type,
             progress_callback=update_progress
         )
         st.session_state.results = all_recaps
@@ -817,7 +738,7 @@ if st.session_state.results:
     if not all_recaps:
         st.warning("Aucun résultat n'a pu être généré. Vérifie les fichiers et les onglets.")
         if skips:
-            with st.expander("🔍 Détails des tests ignorés", expanded=True):
+            with st.expander("🔍 Détails des tests ignorés"):
                 for nom, raison in skips.items():
                     st.markdown(f"- **{nom}** : {raison}")
     else:
@@ -854,11 +775,12 @@ if st.session_state.results:
 
         st.markdown('<div class="section-header">📋 Résultats détaillés par test</div>', unsafe_allow_html=True)
 
-        # Tri par gravité
+        # --- Tri par gravité ---
         sorted_items = sorted(
             all_recaps.items(),
             key=lambda x: -len(x[1][x[1]['Statut'] == '❌ Anomalie'])
         )
+
         labels = [tab_label(nom, len(df[df['Statut'] == '❌ Anomalie'])) for nom, df in sorted_items]
         tabs = st.tabs(labels)
 
@@ -901,6 +823,7 @@ if st.session_state.results:
                     except Exception:
                         st.caption("Export indisponible")
 
+                # Filtrage
                 df_view = df.copy()
                 if only_anom:
                     df_view = df_view[df_view['Statut'] == '❌ Anomalie']
@@ -912,6 +835,7 @@ if st.session_state.results:
                     )
                     df_view = df_view[mask]
 
+                # Résumé
                 if nb_anomalies == 0:
                     st.success(f"✅ Tout est OK sur cet onglet — **{nb_total}** ligne(s) vérifiée(s)")
                 else:
@@ -920,6 +844,7 @@ if st.session_state.results:
                     else:
                         st.warning(f"⚠️ **{nb_anomalies}** anomalie(s) sur {nb_total} ligne(s) · {len(df_view)} affichée(s)")
 
+                # Tableau
                 if len(df_view) == 0:
                     st.info("Aucune ligne ne correspond aux filtres.")
                 else:
@@ -933,29 +858,29 @@ if st.session_state.results:
                     except Exception:
                         st.dataframe(df_view, use_container_width=True, hide_index=True)
 
-elif not file_prev:
+elif not file_sac:
     st.info(
-        "👋 **Bienvenue !** Importe ton fichier Objectifs PREV et au moins un export Power BI "
+        "👋 **Bienvenue !** Importe ton fichier SAC et au moins un export Power BI "
         "dans la barre latérale à gauche, puis clique sur **🚀 Lancer l'Analyse**."
     )
     with st.expander("📖 Comment ça marche ?", expanded=False):
         st.markdown("""
 **1. Prépare tes fichiers**
-- Le fichier **PREV** (xlsx ou csv) avec les objectifs par mois (colonnes `janvier`…`décembre`)
-- Un ou deux exports Power BI : Annuel et/ou Mensuel (avec une colonne `Objectif`)
+- Le fichier SAC `Check_Reporting.xlsx` (obligatoire)
+- Un ou plusieurs exports Power BI (Annuel / Mensuel / Semaines)
 
 **2. Choisis le type de reporting**
-Les règles métier et filtres pays s'adaptent :
+Chaque type active ses propres règles métier et filtres géographiques :
 - **Diffusion** : France + DOM-TOM + Europe, avec règles Maurice/Belgique/Celio/Hema
 - **Brothers / USA** : ciblage Etats-Unis
 - **Canada** : Canada + enseignes 100% canadiennes (Jean Coutu, Brunet, Red Apple)
 
 **3. Lance l'analyse**
-L'outil détecte automatiquement le mois en cours dans la 1ère ligne du fichier BI (ex: `au 31/03` → mars).
+L'outil produit jusqu'à 8 tests (Annuel N/N-1, Mensuel N/N-1, Semaines N/N-1, Avant-Dernière N/N-1).
 
 **4. Examine les résultats**
-- **Objectif Mensuel** : écart entre la colonne du mois PREV et la colonne Objectif du BI Mensuel
-- **Objectif Annuel** : écart entre le cumul janvier→mois détecté du PREV et la colonne Objectif du BI Annuel
+Chaque onglet affiche les écarts. Un écart > 1 € est classé anomalie.
+Tu peux filtrer, rechercher et exporter chaque onglet en Excel.
 """)
 
 else:
