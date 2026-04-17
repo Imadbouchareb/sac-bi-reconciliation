@@ -78,6 +78,24 @@ def make_unique(cols):
             result.append(c)
     return result
 
+# ✅ FIX : Détection stricte des mois pour éviter les faux positifs
+# Problème détecté : 'mai' était matché dans 'semaine' et 'calendaire', ce qui
+# faisait cibler la colonne 'Pays' comme "mois le plus récent" → valeurs à 0.
+MONTH_PATTERN = re.compile(
+    r'^\s*(janvier|janv\.?|février|fevrier|févr\.?|fevr\.?|mars|avril|mai|juin|'
+    r'juillet|juil\.?|août|aout|septembre|sept\.?|octobre|oct\.?|novembre|nov\.?|'
+    r'décembre|decembre|déc\.?|dec\.?)(\b|\s|$|\.|-|/)',
+    re.IGNORECASE
+)
+
+def cell_is_month(val):
+    """Retourne True UNIQUEMENT si la cellule commence par un nom de mois.
+    Évite les faux positifs type 'semaine' (qui contient 'mai') ou 'calendaire'."""
+    s = str(val).strip()
+    if not s or s.lower() in ('nan', 'none', '<na>', 'nat'):
+        return False
+    return bool(MONTH_PATTERN.match(s))
+
 # --- MOTEUR DE RÈGLES DYNAMIQUE ---
 def apply_business_rules(df, col_enseigne, report_type):
     df['Rayon'] = df['Rayon'].astype(str)
@@ -271,11 +289,11 @@ if st.button("🚀 Lancer l'Analyse", type="primary"):
                     unique_cols = make_unique(new_cols)
 
                     # 2. Chercher la ligne des MOIS (Mensuel)
+                    # ✅ FIX : cell_is_month() évite les faux positifs type 'semaine' (qui contient 'mai')
                     month_row_idx = -1
-                    months_kw = ['janv', 'févr', 'fevr', 'mars', 'avril', 'mai', 'juin', 'juil', 'août', 'aout', 'sept', 'oct', 'nov', 'déc', 'dec']
                     for i in range(header_idx - 1, -1, -1):
-                        row_vals = df_raw.iloc[i].fillna('').astype(str).str.lower().values
-                        if any(any(m in str(v) for m in months_kw) for v in row_vals):
+                        row_vals = df_raw.iloc[i].fillna('').values
+                        if any(cell_is_month(v) for v in row_vals):
                             month_row_idx = i
                             break
 
@@ -293,11 +311,9 @@ if st.button("🚀 Lancer l'Analyse", type="primary"):
 
                         valid_months = []
                         for m in filled_months:
-                            if m is not None:
-                                m_str = str(m).lower()
-                                if any(kw in m_str for kw in months_kw) and 'total' not in m_str and 'cumul' not in m_str:
-                                    if m not in valid_months:
-                                        valid_months.append(m)
+                            if m is not None and cell_is_month(m):
+                                if m not in valid_months:
+                                    valid_months.append(m)
 
                         if valid_months:
                             latest_month = valid_months[-1]
