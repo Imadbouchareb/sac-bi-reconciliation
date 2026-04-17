@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import re
 import unicodedata
-from collections import defaultdict  # ✅ FIX 3 : Import sorti de la boucle
+from collections import defaultdict
 
 # Configuration de la page Streamlit
 st.set_page_config(page_title="Check Reporting SAC vs BI", layout="wide", page_icon="📊")
@@ -207,14 +207,14 @@ if st.button("🚀 Lancer l'Analyse", type="primary"):
                 diagnostics = {}
 
                 TESTS_MAPPING = {
-                    "Annuel 2026":           {"onglet_sac": "Cumul 2026",      "file": file_ann,  "col_valeur": "N",      "mode": "Annuel"},
-                    "Annuel 2025":           {"onglet_sac": "Cumul 2025",      "file": file_ann,  "col_valeur": "N-1",    "mode": "Annuel"},
-                    "Mensuel 2026":          {"onglet_sac": "Cumul mois 2026", "file": file_mens, "col_valeur": "N",      "mode": "Mensuel"},
-                    "Mensuel 2025":          {"onglet_sac": "Cumul mois 2025", "file": file_mens, "col_valeur": "N-1",    "mode": "Mensuel"},
-                    "Semaine Der 2026":      {"onglet_sac": "Cumul mois 2026", "file": file_sem,  "col_valeur": "N",      "mode": "Semaine_Derniere"},
-                    "Semaine Der 2025":      {"onglet_sac": "Cumul mois 2025", "file": file_sem,  "col_valeur": "N-1",    "mode": "Semaine_Derniere"},
-                    "Semaine Avant-Der 2026":{"onglet_sac": "Cumul mois 2026", "file": file_sem,  "col_valeur": "N.1",    "mode": "Semaine_Avant_Derniere"},
-                    "Semaine Avant-Der 2025":{"onglet_sac": "Cumul mois 2025", "file": file_sem,  "col_valeur": "N-1.1",  "mode": "Semaine_Avant_Derniere"},
+                    "Annuel 2026":            {"onglet_sac": "Cumul 2026",      "file": file_ann,  "col_valeur": "N",      "mode": "Annuel"},
+                    "Annuel 2025":            {"onglet_sac": "Cumul 2025",      "file": file_ann,  "col_valeur": "N-1",    "mode": "Annuel"},
+                    "Mensuel 2026":           {"onglet_sac": "Cumul mois 2026", "file": file_mens, "col_valeur": "N",      "mode": "Mensuel"},
+                    "Mensuel 2025":           {"onglet_sac": "Cumul mois 2025", "file": file_mens, "col_valeur": "N-1",    "mode": "Mensuel"},
+                    "Semaine Der 2026":       {"onglet_sac": "Cumul mois 2026", "file": file_sem,  "col_valeur": "N",      "mode": "Semaine_Derniere"},
+                    "Semaine Der 2025":       {"onglet_sac": "Cumul mois 2025", "file": file_sem,  "col_valeur": "N-1",    "mode": "Semaine_Derniere"},
+                    "Semaine Avant-Der 2026": {"onglet_sac": "Cumul mois 2026", "file": file_sem,  "col_valeur": "N.1",    "mode": "Semaine_Avant_Derniere"},
+                    "Semaine Avant-Der 2025": {"onglet_sac": "Cumul mois 2025", "file": file_sem,  "col_valeur": "N-1.1",  "mode": "Semaine_Avant_Derniere"},
                 }
 
                 # ✅ OPTIM : Pré-chargement des onglets SAC uniques (évite de relire le fichier plusieurs fois)
