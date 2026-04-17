@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import re
 import unicodedata
+from collections import defaultdict  # ✅ FIX 3 : Import sorti de la boucle
 
 # Configuration de la page Streamlit
 st.set_page_config(page_title="Check Reporting SAC vs BI", layout="wide", page_icon="📊")
@@ -13,10 +14,10 @@ def safe_float_conversion(val):
     if isinstance(val, pd.Series): val = val.iloc[0]
     if pd.isna(val): return 0.0
     if isinstance(val, (int, float)): return float(val)
-    
+
     s = str(val).strip()
     if s == '' or s.lower() in ['nan', 'nat', 'none', 'nc', '<na>']: return 0.0
-    
+
     s = re.sub(r'[^\d,.-]', '', s)
     if '.' in s and ',' in s:
         if s.rfind(',') > s.rfind('.'): s = s.replace('.', '').replace(',', '.')
@@ -25,7 +26,7 @@ def safe_float_conversion(val):
         if s.count(',') > 1: s = s.replace(',', '')
         elif s.count('.') > 1: s = s.replace('.', '')
         else: s = s.replace(',', '.')
-            
+
     if s in ['', '.', '-']: return 0.0
     try: return float(s)
     except ValueError: return 0.0
@@ -107,26 +108,48 @@ def apply_business_rules(df, col_enseigne, report_type):
         apply_rule(['GAP', 'GAP Outlet'], ['Acier', 'Deco'], 'Capsules')
         apply_rule(['GAP', 'GAP Outlet'], ['Catalog'], 'Enfant')
         apply_rule(['Corner ADF'], ['Access'], 'Deco')
-        communes_map = {'ArGarant': 'Bijoux', 'Sacherie': 'Bijoux', 'Catalog': 'Lunettes de vue', 'Papeteri': 'Cartes de voeux', 'Chaussur': 'Access', 'Mariage': 'Bijoux', 'Actua': 'Bijoux', 'Montres': 'Bijoux', 'ParCaiss': 'Parcours Caisse', 'PARCAISS': 'Parcours Caisse'}
-        for old_val, new_val in communes_map.items(): df.loc[df['Rayon'].str.lower().str.contains(f'^{re.escape(old_val.lower())}$', regex=True, na=False), 'Rayon'] = new_val
+        communes_map = {
+            'ArGarant': 'Bijoux', 'Sacherie': 'Bijoux', 'Catalog': 'Lunettes de vue',
+            'Papeteri': 'Cartes de voeux', 'Chaussur': 'Access', 'Mariage': 'Bijoux',
+            'Actua': 'Bijoux', 'Montres': 'Bijoux', 'ParCaiss': 'Parcours Caisse',
+            'PARCAISS': 'Parcours Caisse'
+        }
+        for old_val, new_val in communes_map.items():
+            df.loc[df['Rayon'].str.lower().str.contains(f'^{re.escape(old_val.lower())}$', regex=True, na=False), 'Rayon'] = new_val
 
     elif report_type in ["Brothers", "Accessories USA", "Accessories Canada"]:
         apply_rule(['GAP', 'GAP Outlet'], ['Acier', 'Deco'], 'Capsules')
         apply_rule(['GAP', 'GAP Outlet'], ['Access'], 'Bijoux')
         apply_rule(['GAP', 'GAP Outlet'], ['Catalog'], 'Enfant')
-        communes_map_brothers = {'Sacherie': 'Bijoux', 'Catalog': 'Lunettes de vue', 'Papeteri': 'Cartes de voeux', 'Chaussur': 'Access', 'Mariage': 'Bijoux', 'Montres': 'Bijoux', 'ParCaiss': 'Parcours Caisse', 'PARCAISS': 'Parcours Caisse'}
-        for old_val, new_val in communes_map_brothers.items(): df.loc[df['Rayon'].str.lower().str.contains(f'^{re.escape(old_val.lower())}$', regex=True, na=False), 'Rayon'] = new_val
+        communes_map_brothers = {
+            'Sacherie': 'Bijoux', 'Catalog': 'Lunettes de vue', 'Papeteri': 'Cartes de voeux',
+            'Chaussur': 'Access', 'Mariage': 'Bijoux', 'Montres': 'Bijoux',
+            'ParCaiss': 'Parcours Caisse', 'PARCAISS': 'Parcours Caisse'
+        }
+        for old_val, new_val in communes_map_brothers.items():
+            df.loc[df['Rayon'].str.lower().str.contains(f'^{re.escape(old_val.lower())}$', regex=True, na=False), 'Rayon'] = new_val
 
     return df
 
 # --- CHARGEMENT POWER BI ---
 def load_powerbi_data(file_buffer, target_col):
-    try: df_pbi = pd.read_excel(file_buffer, header=1)
-    except:
-        try: df_pbi = pd.read_excel(file_buffer)
-        except: return pd.DataFrame()
+    # ✅ FIX 1 : Réinitialiser le pointeur AVANT chaque lecture
+    if hasattr(file_buffer, 'seek'):
+        file_buffer.seek(0)
+
+    # ✅ FIX 4 : Bare except remplacé par except Exception
+    try:
+        df_pbi = pd.read_excel(file_buffer, header=1)
+    except Exception:
+        try:
+            if hasattr(file_buffer, 'seek'):
+                file_buffer.seek(0)
+            df_pbi = pd.read_excel(file_buffer)
+        except Exception:
+            return pd.DataFrame()
 
     if target_col not in df_pbi.columns: return pd.DataFrame()
+    if '-Rayon' not in df_pbi.columns or '-Centrale' not in df_pbi.columns: return pd.DataFrame()
 
     mask_total = df_pbi['-Rayon'].astype(str).str.strip().str.lower() == 'total'
     df_pbi.loc[mask_total, target_col] = df_pbi[target_col].shift(1)
@@ -146,7 +169,12 @@ def load_powerbi_data(file_buffer, target_col):
 
     df_pbi['Join_Key'] = df_pbi.apply(lambda x: generate_join_key(x['-Centrale'], x['-Rayon']), axis=1).astype(str)
     df_pbi[target_col] = df_pbi[target_col].apply(safe_float_conversion)
-    df_pbi = df_pbi.drop_duplicates('Join_Key', keep='first')
+
+    # ✅ FIX 2 : groupby sum au lieu de drop_duplicates (évite de perdre des lignes BI)
+    df_pbi = df_pbi.groupby('Join_Key', as_index=False).agg(
+        {'-Centrale': 'first', '-Rayon': 'first', target_col: 'sum'}
+    )
+
     return df_pbi[['Join_Key', '-Centrale', '-Rayon', target_col]]
 
 # --- INTERFACE STREAMLIT ---
@@ -179,51 +207,64 @@ if st.button("🚀 Lancer l'Analyse", type="primary"):
                 diagnostics = {}
 
                 TESTS_MAPPING = {
-                    "Annuel 2026": {"onglet_sac": "Cumul 2026", "file": file_ann, "col_valeur": "N", "mode": "Annuel"},
-                    "Annuel 2025": {"onglet_sac": "Cumul 2025", "file": file_ann, "col_valeur": "N-1", "mode": "Annuel"},
-                    "Mensuel 2026": {"onglet_sac": "Cumul mois 2026", "file": file_mens, "col_valeur": "N", "mode": "Mensuel"},
-                    "Mensuel 2025": {"onglet_sac": "Cumul mois 2025", "file": file_mens, "col_valeur": "N-1", "mode": "Mensuel"},
-                    "Semaine Der 2026": {"onglet_sac": "Cumul mois 2026", "file": file_sem, "col_valeur": "N", "mode": "Semaine_Derniere"},
-                    "Semaine Der 2025": {"onglet_sac": "Cumul mois 2025", "file": file_sem, "col_valeur": "N-1", "mode": "Semaine_Derniere"},
-                    "Semaine Avant-Der 2026": {"onglet_sac": "Cumul mois 2026", "file": file_sem, "col_valeur": "N.1", "mode": "Semaine_Avant_Derniere"},
-                    "Semaine Avant-Der 2025": {"onglet_sac": "Cumul mois 2025", "file": file_sem, "col_valeur": "N-1.1", "mode": "Semaine_Avant_Derniere"}
+                    "Annuel 2026":           {"onglet_sac": "Cumul 2026",      "file": file_ann,  "col_valeur": "N",      "mode": "Annuel"},
+                    "Annuel 2025":           {"onglet_sac": "Cumul 2025",      "file": file_ann,  "col_valeur": "N-1",    "mode": "Annuel"},
+                    "Mensuel 2026":          {"onglet_sac": "Cumul mois 2026", "file": file_mens, "col_valeur": "N",      "mode": "Mensuel"},
+                    "Mensuel 2025":          {"onglet_sac": "Cumul mois 2025", "file": file_mens, "col_valeur": "N-1",    "mode": "Mensuel"},
+                    "Semaine Der 2026":      {"onglet_sac": "Cumul mois 2026", "file": file_sem,  "col_valeur": "N",      "mode": "Semaine_Derniere"},
+                    "Semaine Der 2025":      {"onglet_sac": "Cumul mois 2025", "file": file_sem,  "col_valeur": "N-1",    "mode": "Semaine_Derniere"},
+                    "Semaine Avant-Der 2026":{"onglet_sac": "Cumul mois 2026", "file": file_sem,  "col_valeur": "N.1",    "mode": "Semaine_Avant_Derniere"},
+                    "Semaine Avant-Der 2025":{"onglet_sac": "Cumul mois 2025", "file": file_sem,  "col_valeur": "N-1.1",  "mode": "Semaine_Avant_Derniere"},
                 }
+
+                # ✅ OPTIM : Pré-chargement des onglets SAC uniques (évite de relire le fichier plusieurs fois)
+                onglets_uniques = set(conf['onglet_sac'] for conf in TESTS_MAPPING.values())
+                cache_sac = {}
+                for onglet in onglets_uniques:
+                    try:
+                        cache_sac[onglet] = xl_sac.parse(onglet, header=None)
+                    except Exception:
+                        pass
 
                 for nom_test, conf in TESTS_MAPPING.items():
                     if conf['file'] is None: continue
+                    if conf['onglet_sac'] not in cache_sac: continue
+
+                    # ✅ FIX 1 : Reset du pointeur fichier avant chaque lecture Power BI
+                    if hasattr(conf['file'], 'seek'):
+                        conf['file'].seek(0)
 
                     df_pbi = load_powerbi_data(conf['file'], conf['col_valeur'])
                     if df_pbi.empty: continue
 
-                    try: 
-                        df_raw = xl_sac.parse(conf['onglet_sac'], header=None)
-                    except ValueError: continue
+                    # Copie du cache pour ne pas muter les données partagées entre tests
+                    df_raw = cache_sac[conf['onglet_sac']].copy()
 
-                    # 🔥 1. NOUVEAU RADAR ANTI-FUSION DE CELLULES 🔥
+                    # 🔥 1. RADAR ANTI-FUSION DE CELLULES
                     header_idx = -1
                     for i in range(min(20, len(df_raw))):
                         row_vals = df_raw.iloc[i].astype(str).str.lower().values
                         if any('rayon' in v for v in row_vals):
                             header_idx = i
-                            # On regarde la ligne en dessous pour voir si c'est la vraie ligne des semaines
                             if i + 1 < len(df_raw):
                                 sub_vals = df_raw.iloc[i+1].astype(str).str.lower().values
-                                if any('sem ' in v or 'semaine' in v or 'sem.' in v for v in sub_vals) or any(v in ['n', 'n-1', 'réalisé', 'realise'] for v in sub_vals):
+                                if any('sem ' in v or 'semaine' in v or 'sem.' in v for v in sub_vals) or \
+                                   any(v in ['n', 'n-1', 'réalisé', 'realise'] for v in sub_vals):
                                     header_idx = i + 1
                             break
-                            
+
                     if header_idx == -1: continue
 
                     raw_headers = df_raw.iloc[header_idx].values.copy()
-                    
-                    # Remplissage vertical : on comble les trous ("NaN") par la ligne du dessus (pour récupérer "Rayon" et "Enseigne")
+
+                    # Remplissage vertical : combler les NaN par la ligne du dessus
                     if header_idx > 0:
                         above_headers = df_raw.iloc[header_idx - 1].values
                         for j in range(len(raw_headers)):
                             val_str = str(raw_headers[j]).strip().lower()
                             if val_str in ['nan', 'none', '<na>', 'nat', '']:
                                 raw_headers[j] = above_headers[j]
-                                
+
                     new_cols = [clean_excel_text(str(val)) if str(val) != 'nan' else f'COL_{j}' for j, val in enumerate(raw_headers)]
                     unique_cols = make_unique(new_cols)
 
@@ -242,13 +283,12 @@ if st.button("🚀 Lancer l'Analyse", type="primary"):
                         row_vals = df_raw.iloc[month_row_idx].values
                         current_month = None
                         filled_months = []
-                        # On étire le mois vers la droite
                         for val in row_vals:
                             val_str = str(val).strip()
                             if val_str.lower() not in ['nan', 'none', '<na>', 'nat', '']:
                                 current_month = val
                             filled_months.append(current_month)
-                            
+
                         valid_months = []
                         for m in filled_months:
                             if m is not None:
@@ -256,7 +296,7 @@ if st.button("🚀 Lancer l'Analyse", type="primary"):
                                 if any(kw in m_str for kw in months_kw) and 'total' not in m_str and 'cumul' not in m_str:
                                     if m not in valid_months:
                                         valid_months.append(m)
-                                        
+
                         if valid_months:
                             latest_month = valid_months[-1]
                             detected_month = str(latest_month)
@@ -270,56 +310,57 @@ if st.button("🚀 Lancer l'Analyse", type="primary"):
                     col_enseigne = None
                     for c in df_sac.columns:
                         str_c = str(c).lower()
-                        if col_enseigne is None and ('enseigne' in str_c or 'centrale' in str_c or 'client' in str_c): col_enseigne = c
+                        if col_enseigne is None and ('enseigne' in str_c or 'centrale' in str_c or 'client' in str_c):
+                            col_enseigne = c
                     if not col_enseigne: continue
 
                     df_sac = df_sac[~df_sac[col_enseigne].astype(str).str.contains('Giant Tiger', case=False, na=False)]
 
-                    # 3. EXTRACTION DES VALEURS 
+                    # 3. EXTRACTION DES VALEURS
                     idx_rayon = next((i for i, c in enumerate(df_sac.columns) if 'rayon' in str(c).lower()), 2)
                     possible_cols = []
                     for c in df_sac.columns[idx_rayon+1:]:
                         c_lower = str(c).lower()
-                        # On IGNORE les colonnes de sous-totaux !
                         if any(x in c_lower for x in ['total', 'cumul', 'ecart', 'écart', 'var', '%', 'obj']):
                             continue
                         possible_cols.append(c)
 
                     col_val = None
+
                     if conf['mode'] == "Mensuel":
                         cols_to_sum = [c for c in target_month_cols if c in possible_cols]
                         if not cols_to_sum: cols_to_sum = possible_cols
-                            
+
                         for c in cols_to_sum: df_sac[c] = df_sac[c].apply(safe_float_conversion)
                         col_val = 'Valeur_Cumulee_D_a_H'
                         df_sac[col_val] = df_sac[cols_to_sum].sum(axis=1)
                         diagnostics[nom_test] = f"Mois détecté : **{detected_month.upper()}** (Somme de {len(cols_to_sum)} colonnes : {', '.join(cols_to_sum)})"
 
                     elif conf['mode'] in ["Semaine_Derniere", "Semaine_Avant_Derniere"]:
-                        from collections import defaultdict
+                        # ✅ FIX 3 : defaultdict importé en haut du fichier (plus d'import dans la boucle)
                         base_to_cols = defaultdict(list)
                         for c in possible_cols:
-                            base_name = re.sub(r'\.\d+$', '', str(c)).strip() 
+                            base_name = re.sub(r'\.\d+$', '', str(c)).strip()
                             base_to_cols[base_name].append(c)
-                            
+
                         valid_base_names = []
                         for base_name, cols in base_to_cols.items():
                             if sum(df_sac[c].apply(safe_float_conversion).abs().sum() for c in cols) > 0:
                                 valid_base_names.append(base_name)
-                                
+
                         if len(valid_base_names) < 2: continue
-                        
+
                         target_base = valid_base_names[-1] if conf['mode'] == "Semaine_Derniere" else valid_base_names[-2]
                         target_cols = base_to_cols[target_base]
-                        
+
                         for c in target_cols: df_sac[c] = df_sac[c].apply(safe_float_conversion)
                         col_val = f'Valeur_Sem_{target_base.replace(" ", "_")}'
                         df_sac[col_val] = df_sac[target_cols].sum(axis=1)
-                        
+
                         mot_fusion = "fusionnées" if len(target_cols) > 1 else "sélectionnée"
                         diagnostics[nom_test] = f"Semaine analysée : **{target_base}** (Colonnes {mot_fusion} : {', '.join(target_cols)})"
 
-                    else: # Annuel
+                    else:  # Annuel
                         mots_cles = ['va net', 'ttc', 'ca ', 'chiffre', 'valeur', 'réalisé', 'realise']
                         for c in df_sac.columns:
                             if col_val is None and any(mot in str(c).lower() for mot in mots_cles): col_val = c
@@ -357,11 +398,12 @@ if st.button("🚀 Lancer l'Analyse", type="primary"):
                         if report_type == "Diffusion":
                             pattern_pays = 'France|Guadeloupe|Guyane|Maurice|Réunion|Reunion|Martinique|Calédonie|Caledonie|Malte|Saint[- ]Martin|Royaume[- ]Uni|Barthelemy|Barthélemy|Luxembourg'
                             cond_globale = df_sac[col_pays].astype(str).str.contains(pattern_pays, case=False, na=False, regex=True)
-
-                            cond_belgique_ok = df_sac[col_enseigne].astype(str).str.contains('Besson|Paprika|Monoprix|Morgan|Pimkie|Promod', case=False, na=False) & df_sac[col_pays].astype(str).str.contains('Belgique', case=False, na=False)
-                            cond_celio_interdit = df_sac[col_enseigne].astype(str).str.contains('Celio', case=False, na=False) & ~df_sac[col_pays].astype(str).str.contains('France', case=False, na=False)
-                            cond_hema_interdit = df_sac[col_enseigne].astype(str).str.contains('Hema', case=False, na=False) & ~df_sac[col_pays].astype(str).str.contains('France', case=False, na=False)
-
+                            cond_belgique_ok = df_sac[col_enseigne].astype(str).str.contains('Besson|Paprika|Monoprix|Morgan|Pimkie|Promod', case=False, na=False) & \
+                                               df_sac[col_pays].astype(str).str.contains('Belgique', case=False, na=False)
+                            cond_celio_interdit = df_sac[col_enseigne].astype(str).str.contains('Celio', case=False, na=False) & \
+                                                  ~df_sac[col_pays].astype(str).str.contains('France', case=False, na=False)
+                            cond_hema_interdit = df_sac[col_enseigne].astype(str).str.contains('Hema', case=False, na=False) & \
+                                                 ~df_sac[col_pays].astype(str).str.contains('France', case=False, na=False)
                             df_sac = df_sac[(cond_globale | cond_belgique_ok) & ~cond_celio_interdit & ~cond_hema_interdit]
 
                             mask_maurice = df_sac[col_pays].astype(str).str.contains('Maurice', case=False, na=False)
@@ -397,7 +439,6 @@ if st.button("🚀 Lancer l'Analyse", type="primary"):
                     recap_complet = merged[colonnes_export].rename(columns={
                         '-Centrale': 'Centrale', '-Rayon': 'Rayon',
                         col_val: 'Valeur SAC', conf['col_valeur']: 'Valeur Power BI',
-                        'Statut': 'Statut'
                     })
 
                     recap_complet = recap_complet.sort_values(by='Statut', ascending=True)
@@ -410,7 +451,7 @@ if st.button("🚀 Lancer l'Analyse", type="primary"):
                         with tab:
                             if nom in diagnostics:
                                 st.info(f"🔍 **Diagnostic du script :** {diagnostics[nom]}")
-                            
+
                             nb_anomalies = len(df[df['Statut'] == '❌ Anomalie'])
                             if nb_anomalies > 0:
                                 st.error(f"{nb_anomalies} anomalie(s) détectée(s) sur cet onglet.")
