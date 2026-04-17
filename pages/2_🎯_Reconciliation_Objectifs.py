@@ -506,6 +506,10 @@ def _prepare_sac_dataframe(df_raw_source):
 
     target_month_cols = []
     detected_month = "Inconnu"
+    # ✅ Pour le Mensuel : on prend le DERNIER MOIS COMPLET (= avant-dernier si dernier en cours)
+    target_month_cols_complete = []
+    detected_month_complete = "Inconnu"
+
     if month_row_idx != -1:
         row_vals = df_raw.iloc[month_row_idx].values
         current_month = None
@@ -523,10 +527,21 @@ def _prepare_sac_dataframe(df_raw_source):
                     valid_months.append(m)
 
         if valid_months:
+            # Dernier mois (même partiel) — utilisé pour les Semaines
             latest_month = valid_months[-1]
             detected_month = str(latest_month)
             col_indices = [j for j, m in enumerate(filled_months) if m == latest_month]
             target_month_cols = [unique_cols[j] for j in col_indices if j < len(unique_cols)]
+
+            # Dernier mois COMPLET — pour le Mensuel, on prend l'avant-dernier s'il existe
+            # car le dernier est souvent le mois en cours (partiel)
+            if len(valid_months) >= 2:
+                complete_month = valid_months[-2]
+            else:
+                complete_month = valid_months[-1]
+            detected_month_complete = str(complete_month)
+            col_indices_c = [j for j, m in enumerate(filled_months) if m == complete_month]
+            target_month_cols_complete = [unique_cols[j] for j in col_indices_c if j < len(unique_cols)]
 
     df_raw.columns = unique_cols
     df_sac = df_raw.iloc[header_idx+1:].reset_index(drop=True)
@@ -554,6 +569,8 @@ def _prepare_sac_dataframe(df_raw_source):
         'col_enseigne': col_enseigne,
         'target_month_cols': target_month_cols,
         'detected_month': detected_month,
+        'target_month_cols_complete': target_month_cols_complete,
+        'detected_month_complete': detected_month_complete,
         'possible_cols': possible_cols,
     }, None
 
@@ -663,18 +680,21 @@ def process_sac_test(nom_test, conf, df_raw_source, report_type):
     col_enseigne = prep['col_enseigne']
     target_month_cols = prep['target_month_cols']
     detected_month = prep['detected_month']
+    target_month_cols_complete = prep['target_month_cols_complete']
+    detected_month_complete = prep['detected_month_complete']
     possible_cols = prep['possible_cols']
 
     col_val = None
     diagnostic = ""
 
     if conf['mode'] == "Mensuel":
-        cols_to_sum = [c for c in target_month_cols if c in possible_cols]
+        # ✅ On utilise le DERNIER MOIS COMPLET (avant-dernier si le dernier est en cours)
+        cols_to_sum = [c for c in target_month_cols_complete if c in possible_cols]
         if not cols_to_sum: cols_to_sum = possible_cols
         for c in cols_to_sum: df_sac[c] = df_sac[c].apply(safe_float_conversion)
         col_val = 'Valeur_Cumulee_D_a_H'
         df_sac[col_val] = df_sac[cols_to_sum].sum(axis=1)
-        diagnostic = f"Mois détecté : **{detected_month.upper()}** · Somme de {len(cols_to_sum)} colonne(s) : {', '.join(cols_to_sum)}"
+        diagnostic = f"Dernier mois complet : **{detected_month_complete.upper()}** · Somme de {len(cols_to_sum)} colonne(s) : {', '.join(cols_to_sum)}"
 
     elif conf['mode'] == "Semaine_Derniere":
         base_to_cols = defaultdict(list)
