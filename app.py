@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import re
 import unicodedata
-from collections import defaultdict
+from collections import defaultdict  # ✅ FIX 3 : Import sorti de la boucle
 
 # Configuration de la page Streamlit
 st.set_page_config(page_title="Check Reporting SAC vs BI", layout="wide", page_icon="📊")
@@ -207,14 +207,14 @@ if st.button("🚀 Lancer l'Analyse", type="primary"):
                 diagnostics = {}
 
                 TESTS_MAPPING = {
-                    "Annuel 2026":            {"onglet_sac": "Cumul 2026",      "file": file_ann,  "col_valeur": "N",      "mode": "Annuel"},
-                    "Annuel 2025":            {"onglet_sac": "Cumul 2025",      "file": file_ann,  "col_valeur": "N-1",    "mode": "Annuel"},
-                    "Mensuel 2026":           {"onglet_sac": "Cumul mois 2026", "file": file_mens, "col_valeur": "N",      "mode": "Mensuel"},
-                    "Mensuel 2025":           {"onglet_sac": "Cumul mois 2025", "file": file_mens, "col_valeur": "N-1",    "mode": "Mensuel"},
-                    "Semaine Der 2026":       {"onglet_sac": "Cumul mois 2026", "file": file_sem,  "col_valeur": "N",      "mode": "Semaine_Derniere"},
-                    "Semaine Der 2025":       {"onglet_sac": "Cumul mois 2025", "file": file_sem,  "col_valeur": "N-1",    "mode": "Semaine_Derniere"},
-                    "Semaine Avant-Der 2026": {"onglet_sac": "Cumul mois 2026", "file": file_sem,  "col_valeur": "N.1",    "mode": "Semaine_Avant_Derniere"},
-                    "Semaine Avant-Der 2025": {"onglet_sac": "Cumul mois 2025", "file": file_sem,  "col_valeur": "N-1.1",  "mode": "Semaine_Avant_Derniere"},
+                    "Annuel 2026":           {"onglet_sac": "Cumul 2026",      "file": file_ann,  "col_valeur": "N",      "mode": "Annuel"},
+                    "Annuel 2025":           {"onglet_sac": "Cumul 2025",      "file": file_ann,  "col_valeur": "N-1",    "mode": "Annuel"},
+                    "Mensuel 2026":          {"onglet_sac": "Cumul mois 2026", "file": file_mens, "col_valeur": "N",      "mode": "Mensuel"},
+                    "Mensuel 2025":          {"onglet_sac": "Cumul mois 2025", "file": file_mens, "col_valeur": "N-1",    "mode": "Mensuel"},
+                    "Semaine Der 2026":      {"onglet_sac": "Cumul mois 2026", "file": file_sem,  "col_valeur": "N",      "mode": "Semaine_Derniere"},
+                    "Semaine Der 2025":      {"onglet_sac": "Cumul mois 2025", "file": file_sem,  "col_valeur": "N-1",    "mode": "Semaine_Derniere"},
+                    "Semaine Avant-Der 2026":{"onglet_sac": "Cumul mois 2026", "file": file_sem,  "col_valeur": "N.1",    "mode": "Semaine_Avant_Derniere"},
+                    "Semaine Avant-Der 2025":{"onglet_sac": "Cumul mois 2025", "file": file_sem,  "col_valeur": "N-1.1",  "mode": "Semaine_Avant_Derniere"},
                 }
 
                 # ✅ OPTIM : Pré-chargement des onglets SAC uniques (évite de relire le fichier plusieurs fois)
@@ -241,15 +241,17 @@ if st.button("🚀 Lancer l'Analyse", type="primary"):
                     df_raw = cache_sac[conf['onglet_sac']].copy()
 
                     # 🔥 1. RADAR ANTI-FUSION DE CELLULES
+                    # ✅ FIX : fillna('') AVANT astype(str) sinon les NaN restent en float
+                    #    (comportement changé dans les nouvelles versions de pandas)
                     header_idx = -1
                     for i in range(min(20, len(df_raw))):
-                        row_vals = df_raw.iloc[i].astype(str).str.lower().values
-                        if any('rayon' in v for v in row_vals):
+                        row_vals = df_raw.iloc[i].fillna('').astype(str).str.lower().values
+                        if any('rayon' in str(v) for v in row_vals):
                             header_idx = i
                             if i + 1 < len(df_raw):
-                                sub_vals = df_raw.iloc[i+1].astype(str).str.lower().values
-                                if any('sem ' in v or 'semaine' in v or 'sem.' in v for v in sub_vals) or \
-                                   any(v in ['n', 'n-1', 'réalisé', 'realise'] for v in sub_vals):
+                                sub_vals = df_raw.iloc[i+1].fillna('').astype(str).str.lower().values
+                                if any('sem ' in str(v) or 'semaine' in str(v) or 'sem.' in str(v) for v in sub_vals) or \
+                                   any(str(v) in ['n', 'n-1', 'réalisé', 'realise'] for v in sub_vals):
                                     header_idx = i + 1
                             break
 
@@ -272,7 +274,7 @@ if st.button("🚀 Lancer l'Analyse", type="primary"):
                     month_row_idx = -1
                     months_kw = ['janv', 'févr', 'fevr', 'mars', 'avril', 'mai', 'juin', 'juil', 'août', 'aout', 'sept', 'oct', 'nov', 'déc', 'dec']
                     for i in range(header_idx - 1, -1, -1):
-                        row_vals = df_raw.iloc[i].astype(str).str.lower().values
+                        row_vals = df_raw.iloc[i].fillna('').astype(str).str.lower().values
                         if any(any(m in str(v) for m in months_kw) for v in row_vals):
                             month_row_idx = i
                             break
