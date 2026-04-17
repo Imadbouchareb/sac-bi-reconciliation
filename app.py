@@ -1,3 +1,4 @@
+%%writefile app.py
 import streamlit as st
 import pandas as pd
 import re
@@ -8,19 +9,30 @@ st.set_page_config(page_title="Check Reporting SAC vs BI", layout="wide", page_i
 
 pd.set_option('future.no_silent_downcasting', True)
 
-# --- FONCTIONS DE NETTOYAGE (Version Originale et Stable) ---
+# --- NOUVEAU CONVERTISSEUR INDESTRUCTIBLE ---
 def safe_float_conversion(val):
     if isinstance(val, pd.Series): val = val.iloc[0]
+    if pd.isna(val): return 0.0
+    if isinstance(val, (int, float)): return float(val)
+    
     s = str(val).strip()
     if s == '' or s.lower() in ['nan', 'nat', 'none', 'nc', '<na>']: return 0.0
-    cleaned = re.sub(r'[^\d,.-]', '', s).replace(',', '.')
-    if cleaned in ['', '.', '-']: return 0.0
-    try: return float(cleaned)
+    
+    s = re.sub(r'[^\d,.-]', '', s)
+    if '.' in s and ',' in s:
+        if s.rfind(',') > s.rfind('.'): s = s.replace('.', '').replace(',', '.')
+        else: s = s.replace(',', '')
+    else:
+        if s.count(',') > 1: s = s.replace(',', '')
+        elif s.count('.') > 1: s = s.replace('.', '')
+        else: s = s.replace(',', '.')
+            
+    if s in ['', '.', '-']: return 0.0
+    try: return float(s)
     except ValueError: return 0.0
 
 def clean_excel_text(text):
     if not isinstance(text, str): return text
-    # Cette ligne est vitale : elle retire les puces ET les retours à la ligne cachés !
     return re.sub(r'[-•=●◦○▪\x00-\x1F\x7F]', '', text).strip()
 
 def remove_accents(input_str):
@@ -32,7 +44,6 @@ def generate_join_key(enseigne, rayon):
     enseigne_clean = remove_accents(str(enseigne)).upper()
     enseigne_compact = re.sub(r'[^A-Z0-9]', '', enseigne_clean)
 
-    # Anti-Collision des Enseignes
     if "JEANCOUTU" in enseigne_compact: e = "JEANCO"
     elif "REDAPPLE" in enseigne_compact: e = "REDAPP"
     elif "BRUNET" in enseigne_compact: e = "BRUNET"
@@ -55,15 +66,18 @@ def generate_join_key(enseigne, rayon):
     r = re.sub(r'[^A-Z0-9]', '', remove_accents(str(rayon)).upper())
     return f"{e}_{r}"
 
-def find_actual_header_sac(df):
-    for i in range(len(df)):
-        row = df.iloc[i].astype(str).values
-        if any('Rayon' in str(val) for val in row):
-            new_cols = [clean_excel_text(str(val)) if str(val) != 'nan' else f'COL_{j}' for j, val in enumerate(row)]
-            df.columns = new_cols
-            df_clean = df.iloc[i+1:].reset_index(drop=True)
-            return df_clean.loc[:, ~df_clean.columns.duplicated()].copy()
-    return df
+# Fonction pour éviter les collisions de colonnes
+def make_unique(cols):
+    seen = {}
+    result = []
+    for c in cols:
+        if c in seen:
+            seen[c] += 1
+            result.append(f"{c}.{seen[c]}")
+        else:
+            seen[c] = 0
+            result.append(c)
+    return result
 
 # --- MOTEUR DE RÈGLES DYNAMIQUE ---
 def apply_business_rules(df, col_enseigne, report_type):
@@ -76,9 +90,6 @@ def apply_business_rules(df, col_enseigne, report_type):
                df['Rayon'].str.lower().str.contains(ray_regex, regex=True, na=False)
         df.loc[mask, 'Rayon'] = new_rayon
 
-    # ==========================================
-    # 🟠 RÈGLES POUR LE REPORTING : DIFFUSION
-    # ==========================================
     if report_type == "Diffusion":
         apply_rule(['El Corte'], ['ParCaiss', 'Cheveux'], 'Bijoux')
         apply_rule(['Conbipel'], ['Capsules'], 'Bijoux')
@@ -90,40 +101,23 @@ def apply_business_rules(df, col_enseigne, report_type):
         apply_rule(['BZB'], ['Cheveux'], 'Bijoux')
         apply_rule(['Cache Cache'], ['Cheveux'], 'Bijoux')
         apply_rule(['Zebra'], ['Cheveux'], 'Bijoux')
-
         apply_rule(['Retail'], ['Beaute', 'Montres'], 'Access')
         apply_rule(['Lollipops Retail'], ['Montres'], 'Access')
         apply_rule(['El Corte'], ['Montres', 'Beaute'], 'Access')
         apply_rule(['GL', 'Galeries Lafayette'], ['Papeteri', 'Parfums'], 'Access')
         apply_rule(['Intermarché MOA', 'MOA'], ['ParCaiss'], 'Access')
-
         apply_rule(['GAP', 'GAP Outlet'], ['Acier', 'Deco'], 'Capsules')
         apply_rule(['GAP', 'GAP Outlet'], ['Catalog'], 'Enfant')
         apply_rule(['Corner ADF'], ['Access'], 'Deco')
+        communes_map = {'ArGarant': 'Bijoux', 'Sacherie': 'Bijoux', 'Catalog': 'Lunettes de vue', 'Papeteri': 'Cartes de voeux', 'Chaussur': 'Access', 'Mariage': 'Bijoux', 'Actua': 'Bijoux', 'Montres': 'Bijoux', 'ParCaiss': 'Parcours Caisse', 'PARCAISS': 'Parcours Caisse'}
+        for old_val, new_val in communes_map.items(): df.loc[df['Rayon'].str.lower().str.contains(f'^{re.escape(old_val.lower())}$', regex=True, na=False), 'Rayon'] = new_val
 
-        communes_map = {
-            'ArGarant': 'Bijoux', 'Sacherie': 'Bijoux', 'Catalog': 'Lunettes de vue',
-            'Papeteri': 'Cartes de voeux', 'Chaussur': 'Access', 'Mariage': 'Bijoux',
-            'Actua': 'Bijoux', 'Montres': 'Bijoux', 'ParCaiss': 'Parcours Caisse', 'PARCAISS': 'Parcours Caisse'
-        }
-        for old_val, new_val in communes_map.items():
-            df.loc[df['Rayon'].str.lower().str.contains(f'^{re.escape(old_val.lower())}$', regex=True, na=False), 'Rayon'] = new_val
-
-    # ==========================================
-    # 🔵 RÈGLES POUR : BROTHERS / ACCESSORIES USA / ACCESSORIES CANADA
-    # ==========================================
     elif report_type in ["Brothers", "Accessories USA", "Accessories Canada"]:
         apply_rule(['GAP', 'GAP Outlet'], ['Acier', 'Deco'], 'Capsules')
         apply_rule(['GAP', 'GAP Outlet'], ['Access'], 'Bijoux')
         apply_rule(['GAP', 'GAP Outlet'], ['Catalog'], 'Enfant')
-
-        communes_map_brothers = {
-            'Sacherie': 'Bijoux', 'Catalog': 'Lunettes de vue', 'Papeteri': 'Cartes de voeux',
-            'Chaussur': 'Access', 'Mariage': 'Bijoux', 'Montres': 'Bijoux',
-            'ParCaiss': 'Parcours Caisse', 'PARCAISS': 'Parcours Caisse'
-        }
-        for old_val, new_val in communes_map_brothers.items():
-            df.loc[df['Rayon'].str.lower().str.contains(f'^{re.escape(old_val.lower())}$', regex=True, na=False), 'Rayon'] = new_val
+        communes_map_brothers = {'Sacherie': 'Bijoux', 'Catalog': 'Lunettes de vue', 'Papeteri': 'Cartes de voeux', 'Chaussur': 'Access', 'Mariage': 'Bijoux', 'Montres': 'Bijoux', 'ParCaiss': 'Parcours Caisse', 'PARCAISS': 'Parcours Caisse'}
+        for old_val, new_val in communes_map_brothers.items(): df.loc[df['Rayon'].str.lower().str.contains(f'^{re.escape(old_val.lower())}$', regex=True, na=False), 'Rayon'] = new_val
 
     return df
 
@@ -150,7 +144,6 @@ def load_powerbi_data(file_buffer, target_col):
         df_pbi = df_pbi[~df_pbi['Magasin comparable'].astype(str).str.contains('Dont mag comp', case=False, na=False)]
     df_pbi.loc[df_pbi['-Rayon'].str.lower() == 'total', '-Rayon'] = 'TOTAL'
 
-    # Exclusion Giant Tiger
     df_pbi = df_pbi[~df_pbi['-Centrale'].astype(str).str.contains('Giant Tiger', case=False, na=False)]
 
     df_pbi['Join_Key'] = df_pbi.apply(lambda x: generate_join_key(x['-Centrale'], x['-Rayon']), axis=1).astype(str)
@@ -203,48 +196,101 @@ if st.button("🚀 Lancer l'Analyse", type="primary"):
                     df_pbi = load_powerbi_data(conf['file'], conf['col_valeur'])
                     if df_pbi.empty: continue
 
-                    try: df_raw = xl_sac.parse(conf['onglet_sac'])
+                    try: 
+                        # Lecture Brute pour garder les mois et les semaines
+                        df_raw = xl_sac.parse(conf['onglet_sac'], header=None)
                     except ValueError: continue
 
-                    df_sac = find_actual_header_sac(df_raw)
+                    # 1. Trouver la ligne d'en-tête contenant 'Rayon'
+                    header_idx = -1
+                    for i in range(min(20, len(df_raw))):
+                        if any('rayon' in str(val).lower() for val in df_raw.iloc[i].astype(str).values):
+                            header_idx = i
+                            break
+                            
+                    if header_idx == -1: continue
 
+                    # 2. Remplacer les colonnes par la ligne ciblée
+                    raw_headers = df_raw.iloc[header_idx].values
+                    new_cols = [clean_excel_text(str(val)) if str(val) != 'nan' else f'COL_{j}' for j, val in enumerate(raw_headers)]
+                    unique_cols = make_unique(new_cols) # Rend unique (Sem 15, Sem 15.1)
+                    
+                    # Capter la ligne des mois (juste au-dessus des semaines) pour le Mensuel
+                    target_month_cols = []
+                    if conf['mode'] == "Mensuel" and header_idx > 0:
+                        months_kw = ['janv', 'févr', 'fevr', 'mars', 'avril', 'mai', 'juin', 'juil', 'août', 'aout', 'sept', 'oct', 'nov', 'déc', 'dec']
+                        # On comble les "vides" (fusion de cellules Excel) avec la valeur précédente
+                        month_row = pd.Series(df_raw.iloc[header_idx - 1].values).replace(['nan', 'none', 'None', '', float('nan')], pd.NA).ffill()
+                        
+                        # On trouve le mois le plus récent
+                        valid_months = [val for val in month_row.dropna().unique() if any(m in str(val).lower() for m in months_kw) and 'total' not in str(val).lower()]
+                        if valid_months:
+                            target_month = valid_months[-1]
+                            col_indices = [j for j, val in enumerate(month_row) if str(val) == str(target_month)]
+                            target_month_cols = [unique_cols[j] for j in col_indices if j < len(unique_cols)]
+
+                    df_raw.columns = unique_cols
+                    df_sac = df_raw.iloc[header_idx+1:].reset_index(drop=True)
+
+                    # Identification Centrale
                     col_enseigne = None
                     for c in df_sac.columns:
                         str_c = str(c).lower()
                         if col_enseigne is None and ('enseigne' in str_c or 'centrale' in str_c or 'client' in str_c): col_enseigne = c
                     if not col_enseigne: continue
 
-                    # Exclusion Giant Tiger (SAC)
                     df_sac = df_sac[~df_sac[col_enseigne].astype(str).str.contains('Giant Tiger', case=False, na=False)]
+
+                    # 🔥 INTELLIGENCE SEMAINE & MOIS 🔥
+                    idx_rayon = list(df_sac.columns).index('Rayon') if 'Rayon' in df_sac.columns else 2
+                    possible_cols = []
+                    for c in df_sac.columns[idx_rayon+1:]:
+                        if 'total' in str(c).lower(): break
+                        possible_cols.append(c)
 
                     col_val = None
                     if conf['mode'] == "Mensuel":
-                        cols_to_sum = df_sac.columns[3:8]
+                        # Prend les colonnes du mois détecté, sinon rabat sur les colonnes classiques
+                        cols_to_sum = target_month_cols if target_month_cols else df_sac.columns[3:8]
+                        cols_to_sum = [c for c in cols_to_sum if c in df_sac.columns]
                         for c in cols_to_sum: df_sac[c] = df_sac[c].apply(safe_float_conversion)
-                        col_val = 'Valeur_Cumulee_D_a_H'
+                        col_val = 'Valeur_Cible_Mensuel'
                         df_sac[col_val] = df_sac[cols_to_sum].sum(axis=1)
+
                     elif conf['mode'] in ["Semaine_Derniere", "Semaine_Avant_Derniere"]:
-                        possible_cols = df_sac.columns[3:8]
-                        valid_cols = [c for c in possible_cols if df_sac[c].apply(safe_float_conversion).abs().sum() > 0]
-                        if len(valid_cols) < 2: continue
-                        col_val = valid_cols[-1] if conf['mode'] == "Semaine_Derniere" else valid_cols[-2]
-                        df_sac[col_val] = df_sac[col_val].apply(safe_float_conversion)
-                    else:
+                        from collections import defaultdict
+                        base_to_cols = defaultdict(list)
+                        for c in possible_cols:
+                            base_name = re.sub(r'\.\d+$', '', str(c)).strip() # Enlève le .1 pour les doublons
+                            base_to_cols[base_name].append(c)
+                            
+                        valid_base_names = []
+                        for base_name, cols in base_to_cols.items():
+                            if sum(df_sac[c].apply(safe_float_conversion).abs().sum() for c in cols) > 0:
+                                valid_base_names.append(base_name)
+                                
+                        if len(valid_base_names) < 2: continue
+                        
+                        target_base = valid_base_names[-1] if conf['mode'] == "Semaine_Derniere" else valid_base_names[-2]
+                        target_cols = base_to_cols[target_base]
+                        
+                        for c in target_cols: df_sac[c] = df_sac[c].apply(safe_float_conversion)
+                        col_val = f'Valeur_Sem_{target_base.replace(" ", "_")}'
+                        df_sac[col_val] = df_sac[target_cols].sum(axis=1)
+
+                    else: # Annuel
                         mots_cles = ['va net', 'ttc', 'ca ', 'chiffre', 'valeur', 'réalisé', 'realise']
                         for c in df_sac.columns:
                             if col_val is None and any(mot in str(c).lower() for mot in mots_cles): col_val = c
-                        if not col_val:
-                            try:
-                                idx_rayon = list(df_sac.columns).index('Rayon')
-                                for c in df_sac.columns[idx_rayon+1:]:
-                                    if df_sac[c].apply(safe_float_conversion).abs().sum() > 0:
-                                        col_val = c
-                                        break
-                            except: pass
+                        if not col_val and possible_cols:
+                            for c in possible_cols:
+                                if df_sac[c].apply(safe_float_conversion).abs().sum() > 0:
+                                    col_val = c
+                                    break
                         if not col_val: continue
                         df_sac[col_val] = df_sac[col_val].apply(safe_float_conversion)
 
-                    # DÉTECTION DU PAYS (Méthode robuste originale)
+                    # DÉTECTION DU PAYS
                     col_pays = None
                     max_matches = 0
                     pattern_pays_detect = 'France|Guadeloupe|Guyane|Maurice|Réunion|Reunion|Martinique|Calédonie|Caledonie|Malte|Saint[- ]Martin|Royaume[- ]Uni|Barthelemy|Barthélemy|Luxembourg|USA|Etats|Canada|CAN|US'
