@@ -8,7 +8,7 @@ st.set_page_config(page_title="Check Reporting SAC vs BI", layout="wide", page_i
 
 pd.set_option('future.no_silent_downcasting', True)
 
-# --- NOUVEAU CONVERTISSEUR INDESTRUCTIBLE ---
+# --- CONVERTISSEUR INDESTRUCTIBLE ---
 def safe_float_conversion(val):
     if isinstance(val, pd.Series): val = val.iloc[0]
     if pd.isna(val): return 0.0
@@ -196,24 +196,38 @@ if st.button("🚀 Lancer l'Analyse", type="primary"):
                     if df_pbi.empty: continue
 
                     try: 
-                        # On lit le fichier brut
                         df_raw = xl_sac.parse(conf['onglet_sac'], header=None)
                     except ValueError: continue
 
-                    # 1. Trouver la ligne d'en-tête (contenant 'Rayon')
+                    # 🔥 1. NOUVEAU RADAR ANTI-FUSION DE CELLULES 🔥
                     header_idx = -1
                     for i in range(min(20, len(df_raw))):
-                        if any('rayon' in str(val).lower() for val in df_raw.iloc[i].astype(str).values):
+                        row_vals = df_raw.iloc[i].astype(str).str.lower().values
+                        if any('rayon' in v for v in row_vals):
                             header_idx = i
+                            # On regarde la ligne en dessous pour voir si c'est la vraie ligne des semaines
+                            if i + 1 < len(df_raw):
+                                sub_vals = df_raw.iloc[i+1].astype(str).str.lower().values
+                                if any('sem ' in v or 'semaine' in v or 'sem.' in v for v in sub_vals) or any(v in ['n', 'n-1', 'réalisé', 'realise'] for v in sub_vals):
+                                    header_idx = i + 1
                             break
                             
                     if header_idx == -1: continue
 
-                    raw_headers = df_raw.iloc[header_idx].values
+                    raw_headers = df_raw.iloc[header_idx].values.copy()
+                    
+                    # Remplissage vertical : on comble les trous ("NaN") par la ligne du dessus (pour récupérer "Rayon" et "Enseigne")
+                    if header_idx > 0:
+                        above_headers = df_raw.iloc[header_idx - 1].values
+                        for j in range(len(raw_headers)):
+                            val_str = str(raw_headers[j]).strip().lower()
+                            if val_str in ['nan', 'none', '<na>', 'nat', '']:
+                                raw_headers[j] = above_headers[j]
+                                
                     new_cols = [clean_excel_text(str(val)) if str(val) != 'nan' else f'COL_{j}' for j, val in enumerate(raw_headers)]
                     unique_cols = make_unique(new_cols)
 
-                    # 2. Chercher la ligne des MOIS (en remontant depuis l'en-tête)
+                    # 2. Chercher la ligne des MOIS (Mensuel)
                     month_row_idx = -1
                     months_kw = ['janv', 'févr', 'fevr', 'mars', 'avril', 'mai', 'juin', 'juil', 'août', 'aout', 'sept', 'oct', 'nov', 'déc', 'dec']
                     for i in range(header_idx - 1, -1, -1):
@@ -228,19 +242,18 @@ if st.button("🚀 Lancer l'Analyse", type="primary"):
                         row_vals = df_raw.iloc[month_row_idx].values
                         current_month = None
                         filled_months = []
-                        # Propagation du mois fusionné (ffill manuel)
+                        # On étire le mois vers la droite
                         for val in row_vals:
                             val_str = str(val).strip()
                             if val_str.lower() not in ['nan', 'none', '<na>', 'nat', '']:
                                 current_month = val
                             filled_months.append(current_month)
                             
-                        # Trouver le mois le plus récent (le plus à droite)
                         valid_months = []
                         for m in filled_months:
                             if m is not None:
                                 m_str = str(m).lower()
-                                if any(kw in m_str for kw in months_kw) and 'total' not in m_str:
+                                if any(kw in m_str for kw in months_kw) and 'total' not in m_str and 'cumul' not in m_str:
                                     if m not in valid_months:
                                         valid_months.append(m)
                                         
@@ -250,7 +263,7 @@ if st.button("🚀 Lancer l'Analyse", type="primary"):
                             col_indices = [j for j, m in enumerate(filled_months) if m == latest_month]
                             target_month_cols = [unique_cols[j] for j in col_indices if j < len(unique_cols)]
 
-                    # Application des colonnes au dataframe
+                    # Application des colonnes
                     df_raw.columns = unique_cols
                     df_sac = df_raw.iloc[header_idx+1:].reset_index(drop=True)
 
@@ -262,47 +275,40 @@ if st.button("🚀 Lancer l'Analyse", type="primary"):
 
                     df_sac = df_sac[~df_sac[col_enseigne].astype(str).str.contains('Giant Tiger', case=False, na=False)]
 
-                    # 🔥 NOUVELLE LOGIQUE QUI SAUTE LES SOUS-TOTAUX 🔥
-                    idx_rayon = next((i for i, c in enumerate(df_sac.columns) if str(c).lower() == 'rayon'), 2)
+                    # 3. EXTRACTION DES VALEURS 
+                    idx_rayon = next((i for i, c in enumerate(df_sac.columns) if 'rayon' in str(c).lower()), 2)
                     possible_cols = []
                     for c in df_sac.columns[idx_rayon+1:]:
                         c_lower = str(c).lower()
-                        # Si on voit ces mots, on IGNORE la colonne (mais on ne s'arrête plus !)
+                        # On IGNORE les colonnes de sous-totaux !
                         if any(x in c_lower for x in ['total', 'cumul', 'ecart', 'écart', 'var', '%', 'obj']):
                             continue
                         possible_cols.append(c)
 
                     col_val = None
                     if conf['mode'] == "Mensuel":
-                        # Filtre strict : On prend les colonnes du mois qui sont bien des semaines (pas des totaux)
                         cols_to_sum = [c for c in target_month_cols if c in possible_cols]
-                        
-                        # Sécurité : Si le détecteur de mois a échoué, on prend toutes les semaines dispos
-                        if not cols_to_sum: 
-                            cols_to_sum = possible_cols
+                        if not cols_to_sum: cols_to_sum = possible_cols
                             
                         for c in cols_to_sum: df_sac[c] = df_sac[c].apply(safe_float_conversion)
                         col_val = 'Valeur_Cumulee_D_a_H'
                         df_sac[col_val] = df_sac[cols_to_sum].sum(axis=1)
-                        diagnostics[nom_test] = f"Mois ciblé : **{detected_month.upper()}** (Addition de {len(cols_to_sum)} semaine(s) : {', '.join(cols_to_sum)})"
+                        diagnostics[nom_test] = f"Mois détecté : **{detected_month.upper()}** (Somme de {len(cols_to_sum)} colonnes : {', '.join(cols_to_sum)})"
 
                     elif conf['mode'] in ["Semaine_Derniere", "Semaine_Avant_Derniere"]:
                         from collections import defaultdict
                         base_to_cols = defaultdict(list)
                         for c in possible_cols:
-                            # Enlève le ".1", ".2" pour regrouper la même semaine qui serait en double
                             base_name = re.sub(r'\.\d+$', '', str(c)).strip() 
                             base_to_cols[base_name].append(c)
                             
                         valid_base_names = []
                         for base_name, cols in base_to_cols.items():
-                            # Vérifie si le groupe de semaines a des chiffres à l'intérieur
                             if sum(df_sac[c].apply(safe_float_conversion).abs().sum() for c in cols) > 0:
                                 valid_base_names.append(base_name)
                                 
                         if len(valid_base_names) < 2: continue
                         
-                        # Choix du groupe (la dernière ou l'avant-dernière)
                         target_base = valid_base_names[-1] if conf['mode'] == "Semaine_Derniere" else valid_base_names[-2]
                         target_cols = base_to_cols[target_base]
                         
@@ -311,7 +317,7 @@ if st.button("🚀 Lancer l'Analyse", type="primary"):
                         df_sac[col_val] = df_sac[target_cols].sum(axis=1)
                         
                         mot_fusion = "fusionnées" if len(target_cols) > 1 else "sélectionnée"
-                        diagnostics[nom_test] = f"Semaine ciblée : **{target_base}** (Colonnes {mot_fusion} : {', '.join(target_cols)})"
+                        diagnostics[nom_test] = f"Semaine analysée : **{target_base}** (Colonnes {mot_fusion} : {', '.join(target_cols)})"
 
                     else: # Annuel
                         mots_cles = ['va net', 'ttc', 'ca ', 'chiffre', 'valeur', 'réalisé', 'realise']
@@ -324,7 +330,7 @@ if st.button("🚀 Lancer l'Analyse", type="primary"):
                                     break
                         if not col_val: continue
                         df_sac[col_val] = df_sac[col_val].apply(safe_float_conversion)
-                        diagnostics[nom_test] = f"Colonne ciblée pour l'Annuel : **{col_val}**"
+                        diagnostics[nom_test] = f"Colonne ciblée : **{col_val}**"
 
                     # DÉTECTION DU PAYS
                     col_pays = None
@@ -403,7 +409,7 @@ if st.button("🚀 Lancer l'Analyse", type="primary"):
                     for tab, (nom, df) in zip(onglets, all_recaps.items()):
                         with tab:
                             if nom in diagnostics:
-                                st.info(f"🔍 **Traitement SAC :** {diagnostics[nom]}")
+                                st.info(f"🔍 **Diagnostic du script :** {diagnostics[nom]}")
                             
                             nb_anomalies = len(df[df['Statut'] == '❌ Anomalie'])
                             if nb_anomalies > 0:
