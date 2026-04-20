@@ -320,7 +320,12 @@ def load_powerbi_data(file_buffer, target_col):
 # ============================================================
 def detect_month_from_pbi(file_buffer):
     """Lit les premières lignes du fichier PBI pour détecter le mois en cours.
-    Cherche 'au JJ/MM' ou un nom de mois explicite."""
+    Stratégie (par ordre de priorité) :
+      1. Pattern 'au JJ/MM' explicite (ex: 'données au 31/03/2026')
+      2. Nom de mois explicite présent dans le texte (le plus tardif)
+      3. Fallback : dernière date JJ/MM trouvée (plus tardive en termes de mois)
+    Pourquoi cet ordre : les exports BI contiennent souvent plusieurs dates
+    (ex: 'Période du 01/01 au 31/03'). Prendre la première date serait faux."""
     if hasattr(file_buffer, 'seek'):
         file_buffer.seek(0)
     try:
@@ -329,23 +334,45 @@ def detect_month_from_pbi(file_buffer):
         return None
 
     all_text = ' '.join(df_peek.fillna('').astype(str).values.flatten())
-
-    # Pattern 1 : "au JJ/MM" ou "JJ/MM/AAAA"
-    m = re.search(r'\b\d{1,2}[/\-](\d{1,2})(?:[/\-]\d{2,4})?\b', all_text)
-    if m:
-        try:
-            month_num = int(m.group(1))
-            if 1 <= month_num <= 12:
-                return MONTH_NUM_TO_NAME[month_num]
-        except ValueError:
-            pass
-
-    # Pattern 2 : nom de mois explicite
     all_text_norm = remove_accents(all_text).lower()
+
+    # Priorité 1 : pattern 'au JJ/MM' ou 'au JJ-MM' (le 'au' est la clé)
+    # On prend TOUTES les occurrences et on garde la dernière (le mois le plus tardif).
+    au_matches = re.findall(r'\bau\s+\d{1,2}[/\-](\d{1,2})(?:[/\-]\d{2,4})?\b', all_text_norm)
+    if au_matches:
+        months_found = []
+        for mm in au_matches:
+            try:
+                n = int(mm)
+                if 1 <= n <= 12:
+                    months_found.append(n)
+            except ValueError:
+                continue
+        if months_found:
+            # On prend le mois le plus tardif parmi ceux préfixés par 'au'
+            return MONTH_NUM_TO_NAME[max(months_found)]
+
+    # Priorité 2 : nom de mois explicite (on prend le plus tardif trouvé)
+    month_found_in_text = []
     for mnum, mname in MONTH_NUM_TO_NAME.items():
         mname_norm = remove_accents(mname).lower()
         if re.search(rf'\b{mname_norm}\b', all_text_norm):
-            return mname
+            month_found_in_text.append(mnum)
+    if month_found_in_text:
+        return MONTH_NUM_TO_NAME[max(month_found_in_text)]
+
+    # Priorité 3 : fallback sur TOUTES les dates JJ/MM trouvées → on prend le mois max
+    all_matches = re.findall(r'\b\d{1,2}[/\-](\d{1,2})(?:[/\-]\d{2,4})?\b', all_text)
+    months_all = []
+    for mm in all_matches:
+        try:
+            n = int(mm)
+            if 1 <= n <= 12:
+                months_all.append(n)
+        except ValueError:
+            continue
+    if months_all:
+        return MONTH_NUM_TO_NAME[max(months_all)]
 
     return None
 
