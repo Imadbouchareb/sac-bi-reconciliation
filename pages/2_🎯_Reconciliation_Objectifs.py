@@ -442,12 +442,26 @@ def read_prev_file(file_buffer):
                 has_rayon = any(c == 'rayon' for c in cols_norm)
                 if not (has_enseigne and has_rayon):
                     continue
+                # Scoring : matching tolérant (accepte 'Janvier 2026', 'janv.', etc.)
                 months_norm = [remove_accents(m).lower() for m in MONTH_ORDER]
-                score = sum(1 for c in cols_norm if c in months_norm)
+                short_aliases = ['janv', 'fevr', 'fev', 'avr', 'juil', 'sept', 'sep', 'oct', 'nov', 'dec']
+                score = 0
+                for c in cols_norm:
+                    c_clean = re.sub(r'[\.\-_/]+', ' ', c).strip()
+                    matched = False
+                    # Match exact ou préfixe avec espace/chiffre
+                    for m in months_norm + short_aliases:
+                        if c_clean == m or re.match(rf'^{m}(\s|\d)', c_clean):
+                            matched = True
+                            break
+                    if matched:
+                        score += 1
                 df.columns = [clean_excel_text(str(c)) if str(c).strip() != '' else f'COL_{j}'
                               for j, c in enumerate(df.columns)]
                 df = df.dropna(how='all').reset_index(drop=True)
-                if score > best_score:
+                # >= au lieu de > pour que même un score de 0 retourne un résultat valide
+                # (priorise quand même les meilleurs matches)
+                if score > best_score or best_result is None:
                     best_result = df
                     best_score = score
                     if score >= 12:
@@ -760,11 +774,35 @@ def process_objectif_test(mode, df_prev_source, file_bi, report_type):
 
     df_prev = df_prev_source.copy()
 
+    # Matching tolérant : accepte 'janvier', 'Janvier 2026', 'janv.', 'JANVIER', etc.
+    # On reconnaît un mois si le début de la colonne correspond à un nom de mois
+    # (avec ou sans suffixe année/ponctuation).
+    MONTH_ALIASES = {
+        'janvier':   ['janvier',   'janv'],
+        'février':   ['fevrier',   'fevr',   'fev'],
+        'mars':      ['mars'],
+        'avril':     ['avril',     'avr'],
+        'mai':       ['mai'],
+        'juin':      ['juin'],
+        'juillet':   ['juillet',   'juil'],
+        'août':      ['aout'],
+        'septembre': ['septembre', 'sept',   'sep'],
+        'octobre':   ['octobre',   'oct'],
+        'novembre':  ['novembre',  'nov'],
+        'décembre':  ['decembre',  'dec'],
+    }
+
     def col_to_month(col):
         c = remove_accents(str(col)).lower().strip()
-        for m in MONTH_ORDER:
-            if c == remove_accents(m).lower():
-                return m
+        # Retirer ponctuation finale
+        c = re.sub(r'[\.\-_/]+', ' ', c).strip()
+        # Pour chaque mois, tester si la colonne COMMENCE par un alias suivi
+        # soit d'une fin de chaîne, soit d'un espace/chiffre (ex: "janvier 2026")
+        for canon, aliases in MONTH_ALIASES.items():
+            for alias in aliases:
+                # Match exact OU alias + espace/chiffre derrière
+                if c == alias or re.match(rf'^{alias}(\s|\d|$)', c):
+                    return canon
         return None
 
     month_cols_map = {}
@@ -774,7 +812,11 @@ def process_objectif_test(mode, df_prev_source, file_bi, report_type):
             month_cols_map[m] = c
 
     if detected_month not in month_cols_map:
-        return None, None, f"Colonne '{detected_month}' introuvable dans le fichier PREV"
+        cols_detected = [f"{k} ({v})" for k, v in month_cols_map.items()]
+        return None, None, (
+            f"Colonne '{detected_month}' introuvable dans le fichier PREV. "
+            f"Colonnes mois trouvées : {cols_detected or 'aucune'}"
+        )
 
     month_idx = MONTH_ORDER.index(detected_month)
 
