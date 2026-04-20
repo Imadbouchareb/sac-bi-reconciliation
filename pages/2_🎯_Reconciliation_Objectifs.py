@@ -622,9 +622,14 @@ def _prepare_sac_dataframe(df_raw_source):
 def _apply_geo_filters_and_merge(df_source, col_enseigne, col_val, df_pbi, pbi_col,
                                   report_type, col_pays=None,
                                   source_value_label='Valeur SAC',
-                                  pbi_value_label='Valeur Power BI'):
+                                  pbi_value_label='Valeur Power BI',
+                                  apply_maurice_rate=True):
     """Applique les règles métier + filtres géo puis merge avec PBI.
-    Retourne le DataFrame de récap final."""
+    Retourne le DataFrame de récap final.
+
+    apply_maurice_rate : si True (cas SAC), les valeurs Maurice sont multipliées
+    par 0.019 (conversion roupie → euro). Pour les fichiers déjà en euros
+    (comme le PREV Objectifs), passer False."""
     df_source = apply_business_rules(df_source, col_enseigne, report_type)
 
     if report_type == "Diffusion":
@@ -642,9 +647,12 @@ def _apply_geo_filters_and_merge(df_source, col_enseigne, col_val, df_pbi, pbi_c
                                  ~df_source[col_pays].astype(str).str.contains('France', case=False, na=False)
             df_source = df_source[(cond_globale | cond_belgique_ok) & ~cond_celio_interdit & ~cond_hema_interdit]
 
-            mask_maurice = df_source[col_pays].astype(str).str.contains('Maurice', case=False, na=False)
-            if mask_maurice.sum() > 0:
-                df_source.loc[mask_maurice, col_val] *= 0.019
+            # Règle Maurice : conversion roupie → euro (×0.019)
+            # Désactivée pour les fichiers déjà en euros (ex: PREV Objectifs)
+            if apply_maurice_rate:
+                mask_maurice = df_source[col_pays].astype(str).str.contains('Maurice', case=False, na=False)
+                if mask_maurice.sum() > 0:
+                    df_source.loc[mask_maurice, col_val] *= 0.019
 
         elif report_type in ["Brothers", "Accessories USA"]:
             mask_usa = df_source[col_pays].astype(str).str.contains('USA|Etats-Unis|United States|US', case=False, na=False, regex=True)
@@ -898,7 +906,8 @@ def process_objectif_test(mode, df_prev_source, file_bi, report_type):
     recap = _apply_geo_filters_and_merge(
         df_prev, col_enseigne, col_val, df_pbi, 'Objectif',
         report_type, col_pays,
-        source_value_label='Valeur PREV', pbi_value_label='Objectif Power BI'
+        source_value_label='Valeur PREV', pbi_value_label='Objectif Power BI',
+        apply_maurice_rate=False,  # PREV déjà en euros, pas de conversion nécessaire
     )
     return recap, diagnostic, None
 
