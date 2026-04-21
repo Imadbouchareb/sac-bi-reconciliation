@@ -268,6 +268,9 @@ def apply_business_rules(df, col_enseigne, report_type):
         for old_val, new_val in communes_map_brothers.items():
             df.loc[df['Rayon'].str.lower().str.contains(f'^{re.escape(old_val.lower())}$', regex=True, na=False), 'Rayon'] = new_val
 
+    # Italie, Espagne, Switzerland : pas de retraduction de rayons spécifique
+    # Les filtres géographiques sont appliqués dans _apply_geo_filters_and_merge
+
     return df
 
 
@@ -663,6 +666,27 @@ def _apply_geo_filters_and_merge(df_source, col_enseigne, col_val, df_pbi, pbi_c
             mask_100_canada = df_source[col_enseigne].astype(str).str.contains('Jean Coutu|Brunet|Red Apple', case=False, na=False)
             df_source = df_source[mask_canada | mask_100_canada]
 
+        elif report_type == "Italie":
+            mask_italie = df_source[col_pays].astype(str).str.contains('Italie|Italy', case=False, na=False, regex=True)
+            df_source = df_source[mask_italie]
+
+        elif report_type == "Espagne":
+            mask_espagne = df_source[col_pays].astype(str).str.contains(
+                'Espagne|Spain|Canaries|Canarias|Portugal', case=False, na=False, regex=True
+            )
+            df_source = df_source[mask_espagne]
+
+        elif report_type == "Switzerland":
+            mask_swiss = df_source[col_pays].astype(str).str.contains(
+                'Suisse|Switzerland|Swiss', case=False, na=False, regex=True
+            )
+            df_source = df_source[mask_swiss]
+            # Conversion CHF → EUR : ×1.065
+            # Désactivée pour les fichiers déjà en euros (ex: PREV Objectifs)
+            if apply_maurice_rate:  # on réutilise le flag "source en devise locale"
+                if not df_source.empty:
+                    df_source[col_val] = df_source[col_val] * 1.065
+
     # Agrégation : par (Enseigne, Rayon) + TOTAL par centrale
     if not df_source.empty:
         df_source['Join_Key'] = df_source.apply(
@@ -695,7 +719,11 @@ def _detect_col_pays(df):
     """Détecte automatiquement la colonne Pays dans un DataFrame."""
     col_pays = None
     max_matches = 0
-    pattern = 'France|Guadeloupe|Guyane|Maurice|Réunion|Reunion|Martinique|Calédonie|Caledonie|Malte|Saint[- ]Martin|Royaume[- ]Uni|Barthelemy|Barthélemy|Luxembourg|USA|Etats|Canada|CAN|US'
+    pattern = ('France|Guadeloupe|Guyane|Maurice|Réunion|Reunion|Martinique|Calédonie|Caledonie|'
+                'Malte|Saint[- ]Martin|Royaume[- ]Uni|Barthelemy|Barthélemy|Luxembourg|'
+                'USA|Etats|Canada|CAN|US|'
+                'Italie|Italy|Espagne|Spain|Canaries|Canarias|Portugal|'
+                'Suisse|Switzerland|Swiss')
     for c in df.columns:
         if str(df[c].dtype) in ['float64', 'int64']: continue
         matches = df[c].astype(str).str.contains(pattern, case=False, na=False, regex=True).sum()
@@ -1087,7 +1115,8 @@ with st.sidebar:
     st.markdown('<div class="sidebar-title">⚙️ Configuration</div>', unsafe_allow_html=True)
     report_type = st.selectbox(
         "Type de reporting",
-        ["Diffusion", "Brothers", "Accessories USA", "Accessories Canada"],
+        ["Diffusion", "Brothers", "Accessories USA", "Accessories Canada",
+         "Italie", "Espagne", "Switzerland"],
         help="Détermine les règles métier et filtres géographiques appliqués."
     )
 

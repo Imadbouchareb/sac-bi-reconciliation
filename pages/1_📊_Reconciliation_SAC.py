@@ -260,6 +260,8 @@ def apply_business_rules(df, col_enseigne, report_type):
         for old_val, new_val in communes_map_brothers.items():
             df.loc[df['Rayon'].str.lower().str.contains(f'^{re.escape(old_val.lower())}$', regex=True, na=False), 'Rayon'] = new_val
 
+    # Italie, Espagne, Switzerland : pas de retraduction de rayons spécifique
+
     return df
 
 
@@ -491,6 +493,25 @@ def process_single_test(nom_test, conf, df_raw_source, report_type):
             mask_100_canada = df_sac[col_enseigne].astype(str).str.contains('Jean Coutu|Brunet|Red Apple', case=False, na=False)
             df_sac = df_sac[mask_canada | mask_100_canada]
 
+        elif report_type == "Italie":
+            mask_italie = df_sac[col_pays].astype(str).str.contains('Italie|Italy', case=False, na=False, regex=True)
+            df_sac = df_sac[mask_italie]
+
+        elif report_type == "Espagne":
+            mask_espagne = df_sac[col_pays].astype(str).str.contains(
+                'Espagne|Spain|Canaries|Canarias|Portugal', case=False, na=False, regex=True
+            )
+            df_sac = df_sac[mask_espagne]
+
+        elif report_type == "Switzerland":
+            mask_swiss = df_sac[col_pays].astype(str).str.contains(
+                'Suisse|Switzerland|Swiss', case=False, na=False, regex=True
+            )
+            df_sac = df_sac[mask_swiss]
+            # Conversion CHF → EUR : ×1.065 (SAC en CHF, BI en EUR)
+            if not df_sac.empty:
+                df_sac[col_val] = df_sac[col_val] * 1.065
+
     if not df_sac.empty:
         df_sac['Join_Key'] = df_sac.apply(lambda x: generate_join_key(x[col_enseigne], x['Rayon']), axis=1).astype(str)
         df_sac_rayons = df_sac.groupby('Join_Key', as_index=False)[col_val].sum()
@@ -636,7 +657,8 @@ with st.sidebar:
     st.markdown('<div class="sidebar-title">⚙️ Configuration</div>', unsafe_allow_html=True)
     report_type = st.selectbox(
         "Type de reporting",
-        ["Diffusion", "Brothers", "Accessories USA", "Accessories Canada"],
+        ["Diffusion", "Brothers", "Accessories USA", "Accessories Canada",
+         "Italie", "Espagne", "Switzerland"],
         help="Détermine les règles métier et filtres géographiques appliqués."
     )
 
