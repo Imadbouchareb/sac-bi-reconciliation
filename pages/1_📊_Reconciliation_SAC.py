@@ -3,6 +3,7 @@ import pandas as pd
 import re
 import unicodedata
 import io
+import requests
 from collections import defaultdict
 from datetime import datetime
 
@@ -640,11 +641,120 @@ def style_dataframe(df):
 
 
 # ============================================================
+#                    INTÉGRATION ONEDRIVE
+#    Supporte 2 modes :
+#    - "application" : client_credentials (nécessite consentement admin)
+#    - "delegated"   : refresh_token (aucun admin requis, token tous les 90j)
+# ============================================================
+def _onedrive_configured():
+    try:
+        s = st.secrets.get("onedrive", {})
+        base = all(k in s for k in ["tenant_id", "client_id", "client_secret"])
+        if not base:
+            return False
+        mode = s.get("auth_mode", "application")
+        if mode == "delegated":
+            return "refresh_token" in s
+        return True
+    except Exception:
+        return False
+
+
+def _get_token_application(tenant_id, client_id, client_secret):
+    url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+    resp = requests.post(url, data={
+        "grant_type":    "client_credentials",
+        "client_id":     client_id,
+        "client_secret": client_secret,
+        "scope":         "https://graph.microsoft.com/.default",
+    }, timeout=15)
+    resp.raise_for_status()
+    return resp.json()["access_token"]
+
+
+def _get_token_delegated(tenant_id, client_id, client_secret, refresh_token):
+    url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+    resp = requests.post(url, data={
+        "grant_type":    "refresh_token",
+        "client_id":     client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "scope":         "offline_access Files.Read",
+    }, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    return data["access_token"], data.get("refresh_token", refresh_token)
+
+
+@st.cache_data(ttl=3300, show_spinner=False)
+def _get_access_token_cached(tenant_id, client_id, client_secret,
+                              auth_mode, refresh_token_key):
+    if auth_mode == "delegated":
+        cfg = st.secrets["onedrive"]
+        rt = st.session_state.get("_onedrive_refresh_token") or cfg["refresh_token"]
+        access_token, new_rt = _get_token_delegated(
+            tenant_id, client_id, client_secret, rt
+        )
+        st.session_state["_onedrive_refresh_token"] = new_rt
+        return access_token
+    else:
+        return _get_token_application(tenant_id, client_id, client_secret)
+
+
+def _get_onedrive_token():
+    cfg = st.secrets["onedrive"]
+    auth_mode = cfg.get("auth_mode", "application")
+    rt = cfg.get("refresh_token", "")
+    return _get_access_token_cached(
+        cfg["tenant_id"], cfg["client_id"], cfg["client_secret"],
+        auth_mode, rt[:16] if rt else ""
+    )
+
+
+def _download_onedrive_file(token, item_path, drive_id=None):
+    headers = {"Authorization": f"Bearer {token}"}
+    path_encoded = requests.utils.quote(item_path)
+    if drive_id:
+        url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:{path_encoded}:/content"
+    else:
+        url = f"https://graph.microsoft.com/v1.0/me/drive/root:{path_encoded}:/content"
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        buf = io.BytesIO(resp.content)
+        buf.name = item_path.split("/")[-1]
+        return buf
+    except Exception:
+        return None
+
+
+def load_files_from_onedrive():
+    cfg = st.secrets["onedrive"]
+    drive_id = cfg.get("drive_id", None)
+    paths = {
+        "sac":  cfg.get("path_sac",  "/BI_Reconciliation/Check_Reporting.xlsx"),
+        "ann":  cfg.get("path_ann",  "/BI_Reconciliation/bi_annuel.xlsx"),
+        "mens": cfg.get("path_mens", "/BI_Reconciliation/bi_mensuel.xlsx"),
+        "sem":  cfg.get("path_sem",  "/BI_Reconciliation/bi_semaines.xlsx"),
+    }
+    token = _get_onedrive_token()
+    files, errors = {}, []
+    for nom, path in paths.items():
+        buf = _download_onedrive_file(token, path, drive_id)
+        if buf:  files[nom] = buf
+        else:    errors.append(f"{nom} ({path})")
+    if errors:
+        raise RuntimeError(f"Fichiers introuvables sur OneDrive : {', '.join(errors)}")
+    return files
+
+
+# ============================================================
 #                    SESSION STATE INIT
 # ============================================================
 for key, default in [
     ('results', None), ('diagnostics', {}), ('skips', {}),
     ('last_run_type', None), ('last_run_time', None),
+    ('onedrive_files', None), ('onedrive_error', None),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -663,23 +773,61 @@ with st.sidebar:
     )
 
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-title">📎 Fichiers</div>', unsafe_allow_html=True)
 
-    file_sac = st.file_uploader("Fichier SAC (obligatoire)", type=['xlsx'])
-    if file_sac:
-        st.markdown(f'<div class="upload-ok">✓ {file_sac.name}</div>', unsafe_allow_html=True)
+    # ── Mode OneDrive ou Upload manuel ──────────────────────
+    onedrive_ok = _onedrive_configured()
 
-    file_ann = st.file_uploader("Export BI — Annuel", type=['xlsx', 'csv'])
-    if file_ann:
-        st.markdown(f'<div class="upload-ok">✓ {file_ann.name}</div>', unsafe_allow_html=True)
+    if onedrive_ok:
+        st.markdown('<div class="sidebar-title">☁️ Source des fichiers</div>', unsafe_allow_html=True)
+        source_mode = st.radio("Source", ["☁️ OneDrive (automatique)", "📂 Upload manuel"],
+                               label_visibility="collapsed")
+    else:
+        source_mode = "📂 Upload manuel"
 
-    file_mens = st.file_uploader("Export BI — Mensuel", type=['xlsx', 'csv'])
-    if file_mens:
-        st.markdown(f'<div class="upload-ok">✓ {file_mens.name}</div>', unsafe_allow_html=True)
+    if source_mode == "☁️ OneDrive (automatique)":
+        if st.button("🔄 Charger depuis OneDrive", use_container_width=True):
+            with st.spinner("Connexion OneDrive..."):
+                try:
+                    st.session_state.onedrive_files = load_files_from_onedrive()
+                    st.session_state.onedrive_error = None
+                except Exception as e:
+                    st.session_state.onedrive_files = None
+                    st.session_state.onedrive_error = str(e)
 
-    file_sem = st.file_uploader("Export BI — Semaines", type=['xlsx', 'csv'])
-    if file_sem:
-        st.markdown(f'<div class="upload-ok">✓ {file_sem.name}</div>', unsafe_allow_html=True)
+        if st.session_state.onedrive_error:
+            st.error(f"❌ {st.session_state.onedrive_error}")
+
+        if st.session_state.onedrive_files:
+            od = st.session_state.onedrive_files
+            for label, key in [("SAC", "sac"), ("BI Annuel", "ann"),
+                                ("BI Mensuel", "mens"), ("BI Semaines", "sem")]:
+                if key in od:
+                    st.markdown(f'<div class="upload-ok">☁️ {label} — OneDrive</div>', unsafe_allow_html=True)
+
+        od = st.session_state.onedrive_files or {}
+        file_sac  = od.get("sac")
+        file_ann  = od.get("ann")
+        file_mens = od.get("mens")
+        file_sem  = od.get("sem")
+
+    else:
+        st.markdown('<div class="sidebar-title">📎 Fichiers</div>', unsafe_allow_html=True)
+
+        file_sac = st.file_uploader("Fichier SAC (obligatoire)", type=['xlsx'])
+        if file_sac:
+            st.markdown(f'<div class="upload-ok">✓ {file_sac.name}</div>', unsafe_allow_html=True)
+
+        file_ann = st.file_uploader("Export BI — Annuel", type=['xlsx', 'csv'])
+        if file_ann:
+            st.markdown(f'<div class="upload-ok">✓ {file_ann.name}</div>', unsafe_allow_html=True)
+
+        file_mens = st.file_uploader("Export BI — Mensuel", type=['xlsx', 'csv'])
+        if file_mens:
+            st.markdown(f'<div class="upload-ok">✓ {file_mens.name}</div>', unsafe_allow_html=True)
+
+        file_sem = st.file_uploader("Export BI — Semaines", type=['xlsx', 'csv'])
+        if file_sem:
+            st.markdown(f'<div class="upload-ok">✓ {file_sem.name}</div>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
     bi_loaded = sum(1 for f in [file_ann, file_mens, file_sem] if f is not None)
